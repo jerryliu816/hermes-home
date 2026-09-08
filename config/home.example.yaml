@@ -1,0 +1,50 @@
+# Non-secret description of the property. Copy to config/home.yaml and edit.
+#
+# Zones are semantic first: the topology below is meaningful without any
+# coordinates. When you later provide a house map, add geometry under a zone's
+# `attributes` (normalized x/y in 0..1, polygons, camera orientation) — no
+# schema change is needed.
+home:
+  name: Home
+
+  zones:
+    street:
+      name: Street
+      kind: exterior
+    driveway:
+      name: Driveway
+      kind: exterior
+    front_walkway:
+      name: Front Walkway
+      kind: exterior
+    front_porch:
+      name: Front Porch
+      kind: exterior
+    front_entry:
+      name: Front Entry
+      kind: threshold
+    backyard:
+      name: Backyard
+      kind: exterior
+    garage:
+      name: Garage
+      kind: interior
+
+  # Adjacency is recorded now and deliberately not traversed in v1.
+  # A future correlator can use it without a migration.
+  relationships:
+    - from: street
+      to: driveway
+      relation: adjacent
+    - from: driveway
+      to: front_walkway
+      relation: adjacent
+    - from: front_walkway
+      to: front_porch
+      relation: leads_to
+    - from: front_porch
+      to: front_entry
+      relation: leads_to
+    - from: driveway
+      to: garage
+      relation: leads_to

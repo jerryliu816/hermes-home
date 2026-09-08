@@ -1,0 +1,64 @@
+services:
+  hermes-home:
+    build: .
+    image: hermes-home:0.1.0
+    container_name: hermes-home
+
+    # Restarts on crash, on Docker daemon start, and after a reboot once a user
+    # session exists. "unless-stopped" and not "always" so that a deliberate
+    # `docker compose stop` stays stopped across a restart of the daemon.
+    restart: unless-stopped
+
+    # Published ONLY on the two interfaces that need it. Binding each mapping to
+    # an explicit host address means the service is not reachable on any other
+    # interface -- no VPN adapter, no secondary network, and never 0.0.0.0.
+    #
+    #   127.0.0.1  -> Hermes, running on this machine, reaching MCP via localhost
+    #   ${LAN_BIND_IP} -> Home Assistant posting webhooks across the LAN
+    #
+    # Inside the container the app still binds 0.0.0.0, which is correct: the
+    # container's network namespace is private, and Docker decides what is
+    # actually published.
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8099}:8099"
+      - "${LAN_BIND_IP:?set LAN_BIND_IP in .env to this machine's LAN address}:${HOST_PORT:-8099}:8099"
+
+    # Secrets come from the host .env and are never baked into the image.
+    env_file:
+      - .env
+
+    environment:
+      # Absolute path inside the container; overrides the host-relative value
+      # in .env, which would otherwise resolve against /app.
+      DATABASE_URL: "sqlite+aiosqlite:////data/hermes-home.db"
+      DB_PATH: /data/hermes-home.db
+      # Explicit so it never depends on the working directory.
+      CONFIG_DIR: /app/config
+      BACKUP_DIR: /data/backups
+      # Binding inside the container; host exposure is controlled by `ports`.
+      HOST: "0.0.0.0"
+      PORT: "8099"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+
+    volumes:
+      # The database lives on the host, outside the disposable container
+      # filesystem, so it survives rebuilds and is backed up with ordinary tools.
+      - ./data:/data
+      # House description is configuration, not code: read-only, and editable
+      # without rebuilding the image.
+      - ./config:/app/config:ro
+
+    # Must exceed the app's own graceful shutdown (worker grace 30s + uvicorn
+    # 40s) or Docker SIGKILLs us mid-job. Work would still be recoverable via
+    # lease expiry, but finishing cleanly is cheaper.
+    stop_grace_period: 60s
+
+    # Bounded logs: without this the json-file driver grows without limit.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    security_opt:
+      - no-new-privileges:true

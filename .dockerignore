@@ -1,0 +1,27 @@
+# Secrets and runtime state must never enter the image.
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Local, non-example home configuration is mounted at runtime, not baked in.
+config/home.yaml
+config/cameras.yaml
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.git/
+.gitignore
+*.egg-info/
+dist/
+build/
+tests/
+docs/
+.DS_Store

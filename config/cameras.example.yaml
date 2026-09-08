@@ -1,0 +1,21 @@
+# Which Home Assistant entities represent which camera, and where each looks.
+# Copy to config/cameras.yaml and replace the entity IDs with your real ones
+# (Developer Tools -> States in Home Assistant will list them).
+#
+# event_image_strategy:
+#   image_entity_state  Read the image.* entity, whose STATE is a timestamp of
+#                       the last image change. That gives a freshness signal, so
+#                       we can avoid analyzing the previous event's frame.
+#                       Verified behavior for Eufy; confirm for other brands.
+#   camera_snapshot     No freshness signal — take a snapshot from camera.* directly.
+#   none                Metadata-only event; no image is fetched or analyzed.
+cameras:
+  front_door:
+    name: Front Door
+    camera_entity: camera.front_door
+    event_image_entity: image.front_door_event_image
+    event_image_strategy: image_entity_state
+    location: front_entry
+    observes:
+      - front_porch
+      - front_walkway

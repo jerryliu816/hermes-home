@@ -1,0 +1,56 @@
+[project]
+name = "hermes-home"
+version = "0.1.0"
+description = "Semantic event memory bridging Home Assistant and the Hermes Agent"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn==0.52.4",
+    "httpx==0.28.1",
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
+    "sqlalchemy[asyncio]==2.0.52",
+    "aiosqlite==0.22.1",
+    "alembic==1.19.2",
+    "structlog==26.1.0",
+    "pyyaml==6.0.3",
+    "typer==0.27.2",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic==1.4.0"]
+mcp = ["mcp==2.2.0"]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.6",
+]
+
+[project.scripts]
+hermes-home = "hermes_home.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hermes_home"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:hermes_home.*"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py311"
+
+[tool.ruff.lint]
+# DTZ is the load-bearing one: it bans naive datetime.now()/utcnow(), which is
+# risk #1 in the design. The rest is a conventional, quiet baseline.
+select = ["E", "F", "I", "UP", "B", "DTZ", "ASYNC", "RUF"]
+ignore = ["B008"]  # FastAPI's Depends() in defaults is idiomatic
+
+[tool.ruff.lint.per-file-ignores]
+"src/hermes_home/storage/migrations/*" = ["E501", "I001"]
