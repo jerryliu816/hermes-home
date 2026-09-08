@@ -6,15 +6,26 @@ questions of.
 ```
 You:     What happened at the front door?
 
-Hermes:  At 8:47 AM today, the front-door camera recorded one person in a dark
-         jacket. The system classified it as a likely package delivery.
+Hermes:  At about 1:43 PM, a man in a light-blue long-sleeve shirt and khaki
+         shorts stood near the front-entry shrubbery looking upward, then walked
+         away along the path. No package, vehicle, or animal was detected. The
+         camera model rated this medium-to-high confidence.
 
-         Caveat: the scene analysis came from a mock/test provider with medium
-         confidence, so this is not verified real-camera analysis.
+         Earlier, around 11:52 AM, another person walked by carrying a plastic
+         bag containing printed material.
 ```
 
-That answer is grounded in a stored observation, not a guess — and the caveat is
-there because the record knows which model produced it.
+A real exchange, from real camera events. Hermes made one tool call —
+`home_recent_events(camera="front_door")` — and everything in the answer came
+back from it: the times, the descriptions, the absence of a vehicle, and the
+confidence.
+
+"No package" there is a real observation, not an assumption: the stored record
+says `package_present: false` because the model could see there wasn't one. Had
+the frame been too dark to tell, it would have been stored as *unknown* — a
+distinct value — and Hermes would have said it didn't know rather than reporting
+an all-clear. The confidence remark is volunteered unprompted, because every
+observation carries the provider, model and confidence that produced it.
 
 ## The problem
 
@@ -62,8 +73,10 @@ anyone come to the door on a weekday?" becomes an answerable question rather
 than a scroll through notifications.
 
 **Answers that are grounded, and honest when they are not.** Every observation
-records which provider and model produced it, so the agent can tell you when an
-interpretation is weak — as it does in the exchange above, unprompted.
+records which provider, model and confidence produced it, so the agent can
+qualify a weak reading instead of stating it flatly — as it does above, without
+being asked. Run the mock provider and it will tell you the interpretation is
+synthetic.
 
 **Unknown never becomes zero.** If the model could not tell how many people were
 in a dark frame, that is stored as *unknown*, not as `0`. Counts and averages
