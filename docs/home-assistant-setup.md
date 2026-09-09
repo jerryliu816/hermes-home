@@ -155,6 +155,44 @@ bytes are accepted normally.
 Nothing to configure — but if you see `rejected_stale_image` in the deliveries
 table shortly after restarting Home Assistant, this is why, and it is correct.
 
+## Adding another camera
+
+One automation per trigger entity, all sharing the same `rest_command`. Nothing
+about the webhook format changes.
+
+Add the camera to `config/cameras.yaml` (and any new zone to `config/home.yaml`),
+restart, then duplicate the automation with four values changed: the trigger
+entity, `event_type`, `camera`, and `entity_id`.
+
+```yaml
+alias: Garage Right motion -> hermes-home
+mode: queued
+max: 10
+
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.garage_right_motion_detected   # <- the trigger
+    to: "on"
+
+actions:
+  - action: rest_command.hermes_home_event
+    data:
+      event_type: camera.motion                             # motion, not person
+      camera: garage_right                                  # key in cameras.yaml
+      entity_id: image.garage_right_event_image             # the IMAGE entity
+      timestamp: "{{ now().isoformat() }}"
+```
+
+**`entity_id` must be the `image.*` entity, not the trigger sensor.** Events are
+recorded against it, and the MCP camera filter resolves a camera key to its
+event-image entity. Send the binary sensor instead and events will still be
+stored and analyzed — but `home_recent_events(camera="garage_right")` will
+silently return nothing.
+
+Pick `event_type` to match what the sensor actually reports: a motion sensor is
+`camera.motion`, a person sensor is `camera.person_detected`. The full list is
+in the section below; an unknown value is rejected with a 422.
+
 ## Supported `event_type` values
 
 `camera.motion`, `camera.person_detected`, `camera.vehicle_detected`,

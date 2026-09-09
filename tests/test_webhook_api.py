@@ -132,7 +132,7 @@ async def test_health_reports_queue_depth(client) -> None:
     body = response.json()
     assert body["status"] == "ok"
     assert body["queue"]["pending"] == 1
-    assert body["cameras"] == ["front_door"]
+    assert body["cameras"] == ["front_door", "garage_right"]
     # The mock provider means no model is in play, and no key is ever exposed.
     assert body["vision_model"] is None
     assert "token" not in response.text.lower()

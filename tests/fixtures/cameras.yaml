@@ -1,0 +1,25 @@
+# Test fixture: two cameras, mirroring the real deployment's shape.
+#
+# front_door  sits at a threshold and observes the approach to it.
+# garage_right sits at a different threshold and observes the driveway --
+#              notably it does NOT observe `garage`, so a camera being *at*
+#              a place and *seeing into* it stay distinguishable in tests.
+cameras:
+  front_door:
+    name: Front Door
+    camera_entity: camera.front_door
+    event_image_entity: image.front_door_event_image
+    event_image_strategy: image_entity_state
+    location: front_entry
+    observes:
+      - front_porch
+      - front_walkway
+
+  garage_right:
+    name: Garage Right
+    camera_entity: camera.garage_right
+    event_image_entity: image.garage_right_event_image
+    event_image_strategy: image_entity_state
+    location: garage_entry
+    observes:
+      - driveway

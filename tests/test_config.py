@@ -19,14 +19,26 @@ from hermes_home.core.errors import ConfigError
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_example_config_is_valid() -> None:
-    """The shipped examples must actually work, or the quick start is a lie."""
-    home = load_home_config(REPO_ROOT / "config")
-    cameras = load_cameras_config(REPO_ROOT / "config")
+def test_example_config_is_valid(tmp_path) -> None:
+    """The shipped *.example.yaml must actually work, or the quick start is a lie.
+
+    Validates the committed examples rather than the operator's real config,
+    which is gitignored and absent from a fresh clone.
+    """
+    import shutil
+
+    for name in ("home", "cameras"):
+        shutil.copy(REPO_ROOT / "config" / f"{name}.example.yaml", tmp_path / f"{name}.yaml")
+
+    home = load_home_config(tmp_path)
+    cameras = load_cameras_config(tmp_path)
     validate_home_and_cameras(home, cameras)
 
     assert "front_entry" in home.zones
     assert cameras.cameras["front_door"].event_image_entity
+    # Second camera, added by configuration alone.
+    assert cameras.cameras["garage_right"].event_image_entity
+    assert cameras.cameras["garage_right"].location == "garage_entry"
 
 
 def test_missing_config_file_is_explicit(tmp_path: Path) -> None:

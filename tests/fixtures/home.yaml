@@ -1,11 +1,16 @@
-# Non-secret description of the property. Copy to config/home.yaml and edit.
+# Test fixture: a small property used by the whole suite.
 #
-# Zones are semantic first: the topology below is meaningful without any
-# coordinates. When you later provide a house map, add geometry under a zone's
-# `attributes` (normalized x/y in 0..1, polygons, camera orientation) — no
-# schema change is needed.
+# Deliberately NOT the operator's real config/home.yaml -- that file is
+# gitignored, so tests that read it cannot run on a fresh clone. Keeping a
+# fixture here also means the suite's assertions do not shift when someone
+# rearranges their actual house.
+#
+# Two properties the tests depend on:
+#   - two cameras, in different zones, so multi-camera behaviour is covered
+#   - at least one zone nothing observes (backyard, garage), so the
+#     "no coverage" semantics stay tested
 home:
-  name: Home
+  name: Test Home
 
   zones:
     street:
@@ -23,18 +28,16 @@ home:
     front_entry:
       name: Front Entry
       kind: threshold
-    backyard:
-      name: Backyard
-      kind: exterior
-    garage:
-      name: Garage
-      kind: interior
     garage_entry:
       name: Garage Entry
       kind: threshold
+    garage:
+      name: Garage
+      kind: interior
+    backyard:
+      name: Backyard
+      kind: exterior
 
-  # Adjacency is recorded now and deliberately not traversed in v1.
-  # A future correlator can use it without a migration.
   relationships:
     - from: street
       to: driveway

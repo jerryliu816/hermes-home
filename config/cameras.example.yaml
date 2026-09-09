@@ -19,3 +19,15 @@ cameras:
     observes:
       - front_porch
       - front_walkway
+
+  garage_right:
+    name: Garage Right
+    camera_entity: camera.garage_right
+    event_image_entity: image.garage_right_event_image
+    event_image_strategy: image_entity_state
+    location: garage_entry
+    # Mounted on the garage's front-facing wall, looking outward at the
+    # driveway. It does NOT see inside the garage -- listing `garage` here
+    # would make an absence of events there read as an all-clear.
+    observes:
+      - driveway

@@ -27,6 +27,11 @@ from hermes_home.storage.engine import create_engine, create_session_factory, se
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+#: Tests read this instead of the operator's real config/, which is gitignored
+#: and would make the suite unrunnable on a fresh clone -- and would couple test
+#: assertions to whatever the actual house looks like today.
+FIXTURE_CONFIG = Path(__file__).resolve().parent / "fixtures"
+
 
 def _png(width: int, height: int, *, tag: bytes = b"") -> bytes:
     """Build a genuinely valid PNG.
@@ -90,7 +95,7 @@ def settings(tmp_path: Path) -> Settings:
         webhook_secret="test-secret",
         vision_provider="mock",
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
-        config_dir=REPO_ROOT / "config",
+        config_dir=FIXTURE_CONFIG,
         ingest_poll_seconds=0.01,
         freshness_poll_interval_seconds=0.001,
         dedupe_window_seconds=15,
@@ -102,14 +107,14 @@ def settings(tmp_path: Path) -> Settings:
 def home_config() -> HomeConfig:
     from hermes_home.config import load_home_config
 
-    return load_home_config(REPO_ROOT / "config")
+    return load_home_config(FIXTURE_CONFIG)
 
 
 @pytest.fixture
 def cameras_config() -> CamerasConfig:
     from hermes_home.config import load_cameras_config
 
-    return load_cameras_config(REPO_ROOT / "config")
+    return load_cameras_config(FIXTURE_CONFIG)
 
 
 @pytest.fixture

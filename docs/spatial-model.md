@@ -46,9 +46,15 @@ so either endpoint can be queried. The current property graph:
 
 ```
    street ── driveway ── front_walkway ── front_porch ── front_entry
-                 │
-              garage                              backyard  (unobserved)
+                 │                                        [front_door]
+            garage_entry ── garage  (interior, unobserved)
+           [garage_right]
+                                                  backyard  (unobserved)
 ```
+
+Cameras in brackets sit *at* a zone and look outward from it. `garage_right` is
+mounted on the garage's front-facing wall, so it observes the **driveway** and
+not the garage interior — which is why `garage` stays in `unobserved_zones`.
 
 **Edges are recorded but deliberately not traversed.** There is no path-finding,
 no plausible-transition scoring, no trajectory estimation. The zone *schema* is

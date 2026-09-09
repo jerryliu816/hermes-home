@@ -53,7 +53,9 @@ async def test_adjacency_is_bidirectional(session_factory) -> None:
 async def test_leads_to_relations_are_present(session_factory) -> None:
     async with session_scope(session_factory) as session:
         assert "front_porch" in await adjacent_zone_keys(session, "front_walkway")
-        assert "garage" in await adjacent_zone_keys(session, "driveway")
+        # The driveway meets the garage through its entry, not directly.
+        assert "garage_entry" in await adjacent_zone_keys(session, "driveway")
+        assert "garage" in await adjacent_zone_keys(session, "garage_entry")
 
 
 async def test_seeding_is_idempotent(session_factory, home_config, cameras_config) -> None:
@@ -275,12 +277,12 @@ async def test_seeding_converges_when_relationships_change(
 
     trimmed = home_config.model_copy(deep=True)
     trimmed.relationships = [
-        r for r in trimmed.relationships if r.from_zone != "driveway" or r.to_zone != "garage"
+        r for r in trimmed.relationships if r.from_zone != "driveway" or r.to_zone != "garage_entry"
     ]
 
     async with session_scope(session_factory) as session:
         await seed_home(session, trimmed, cameras_config)
 
     async with session_scope(session_factory) as session:
-        assert "garage" not in await adjacent_zone_keys(session, "driveway")
+        assert "garage_entry" not in await adjacent_zone_keys(session, "driveway")
         assert await session.scalar(select(func.count()).select_from(ZoneEdge)) > 0

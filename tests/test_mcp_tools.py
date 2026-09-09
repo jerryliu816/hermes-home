@@ -218,9 +218,13 @@ async def test_describe_home_flags_unobserved_zones(mcp_server) -> None:
     home = await call(mcp_server, "home_describe_home")
 
     assert home["timezone"]
-    assert {c["key"] for c in home["cameras"]} == {"front_door"}
+    assert {c["key"] for c in home["cameras"]} == {"front_door", "garage_right"}
     assert "backyard" in home["unobserved_zones"]
     assert "front_entry" not in home["unobserved_zones"]
+    # The garage cameras are mounted on its outward face and see the driveway,
+    # not the inside, so the garage itself stays unobserved.
+    assert "garage" in home["unobserved_zones"]
+    assert "driveway" not in home["unobserved_zones"]
 
 
 async def test_summarize_activity_is_deterministic_counts_only(mcp_server, stored_event) -> None:
