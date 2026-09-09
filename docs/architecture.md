@@ -117,6 +117,19 @@ event" real rather than aspirational.
 Incidents are derived and disposable, tagged with the `correlator` that produced
 them, so improving the rule means recomputing rather than migrating.
 
+An incident stays `open` only while another event could still legitimately join
+it — that is, within `incident_idle_seconds` (default 120s, matching the
+correlation window) of its last event. A maintenance sweep then closes it and
+writes a deterministic one-line summary:
+
+```
+2 events in front_entry over 35s; package_present, person_present
+```
+
+That summary is assembled from the incident's own events and tags. No model is
+consulted: it is a record, and narrative is Hermes' job. Being deterministic
+also means it can be safely recomputed if the correlator ever changes.
+
 ## Three ideas worth keeping
 
 **Unknown is `NULL`, never zero.** SQL's three-valued logic then does the right

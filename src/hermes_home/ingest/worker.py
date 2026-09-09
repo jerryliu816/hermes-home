@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from hermes_home.clients.home_assistant import HomeAssistantClient
 from hermes_home.config import CamerasConfig, Settings
 from hermes_home.domain.event_types import UnknownEventTypeError
+from hermes_home.ingest.correlate import close_stale_incidents
 from hermes_home.ingest.pipeline import ProcessingError, process_delivery
 from hermes_home.ingest.retention import prune_raw_bodies
 from hermes_home.storage.engine import session_scope
@@ -61,7 +62,7 @@ class IngestWorker:
     async def start(self) -> None:
         for index in range(self._settings.ingest_worker_concurrency):
             self._tasks.append(asyncio.create_task(self._run(index), name=f"ingest-worker-{index}"))
-        self._tasks.append(asyncio.create_task(self._run_retention(), name="retention"))
+        self._tasks.append(asyncio.create_task(self._run_maintenance(), name="maintenance"))
         logger.info("worker.started", concurrency=self._settings.ingest_worker_concurrency)
 
     async def stop(self, *, grace_seconds: float | None = None) -> None:
@@ -199,21 +200,47 @@ class IngestWorker:
             log.info("worker.finished", disposition=outcome.disposition)
             return True
 
-    async def _run_retention(self) -> None:
+    async def _run_maintenance(self) -> None:
+        """Periodic housekeeping: close settled incidents, prune old payloads.
+
+        One loop rather than one task per job. It ticks at the shorter of the
+        two cadences (incidents, ~60s) and runs retention on its own much longer
+        schedule, so adding a third chore later costs a branch rather than
+        another scheduler.
+        """
+        last_retention = 0.0
         while not self._stopping.is_set():
             try:
-                await prune_raw_bodies(
-                    self._session_factory,
-                    retention_days=self._settings.delivery_raw_retention_days,
-                )
+                await self.close_settled_incidents()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("retention.sweep_failed")
+                logger.exception("incidents.sweep_failed")
+
+            elapsed = asyncio.get_running_loop().time() - last_retention
+            if last_retention == 0.0 or elapsed >= self._settings.retention_sweep_interval_seconds:
+                try:
+                    await prune_raw_bodies(
+                        self._session_factory,
+                        retention_days=self._settings.delivery_raw_retention_days,
+                    )
+                    last_retention = asyncio.get_running_loop().time()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("retention.sweep_failed")
+
             try:
                 await asyncio.wait_for(
                     self._stopping.wait(),
-                    timeout=self._settings.retention_sweep_interval_seconds,
+                    timeout=self._settings.incident_sweep_interval_seconds,
                 )
             except TimeoutError:
                 continue
+
+    async def close_settled_incidents(self) -> int:
+        """Close incidents that can no longer receive a correlated event."""
+        async with session_scope(self._session_factory) as session:
+            return await close_stale_incidents(
+                session, idle_seconds=self._settings.incident_idle_seconds
+            )

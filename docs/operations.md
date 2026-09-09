@@ -165,6 +165,28 @@ $ crontab -e
 The database is small — a year of events is a few megabytes — so retention is
 about having enough history to roll back to, not about space.
 
+## Background maintenance
+
+One loop in the ingest worker handles both periodic chores, ticking at the
+shorter cadence rather than running a scheduler per job:
+
+| Job | Default cadence | Setting |
+|---|---|---|
+| Close settled incidents and summarize them | 60s | `INCIDENT_SWEEP_INTERVAL_SECONDS` |
+| Prune raw webhook bodies past retention | hourly | `RETENTION_SWEEP_INTERVAL_SECONDS` |
+
+An incident is closed once it has been idle for `INCIDENT_IDLE_SECONDS`
+(default 120, matching the correlation window). Closing only sets `status`,
+`summary` and `updated_at` — event membership is never touched — and the sweep
+is idempotent, so an already-closed incident is skipped rather than rewritten.
+
+Look for `incidents.closed` in the logs:
+
+```console
+$ make logs | grep incidents.closed
+  incidents.closed  count=9 idle_seconds=120
+```
+
 ## Where data lives
 
 | Path | Contents | Survives container removal |

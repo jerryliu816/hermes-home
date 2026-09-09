@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     ingest_poll_seconds: float = 1.0
     dedupe_window_seconds: int = Field(default=15, ge=0)
     correlation_window_seconds: int = Field(default=120, ge=0)
+    #: How long an incident stays open after its last event. Matches the
+    #: correlation window by default: an incident should remain open exactly as
+    #: long as it could still legitimately attract another correlated event.
+    incident_idle_seconds: int = Field(default=120, ge=0)
+    #: How often the maintenance loop looks for incidents to close.
+    incident_sweep_interval_seconds: int = Field(default=60, ge=1)
 
     # Freshness gate. Measured on real Eufy hardware: the event still lands on
     # the image entity ~3.7s after the detection trigger fires, so the budget
