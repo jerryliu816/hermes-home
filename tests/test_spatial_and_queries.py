@@ -226,11 +226,16 @@ def test_cameras_observing_reads_config(cameras_config) -> None:
 
     assert cameras_observing(cameras_config, "front_porch") == ["front_door"]
     assert cameras_observing(cameras_config, "front_entry") == ["front_door"]
-    assert cameras_observing(cameras_config, "backyard") == []
+    # Two cameras on the garage's front wall both watch the driveway.
+    assert cameras_observing(cameras_config, "driveway") == ["garage_left", "garage_right"]
+    # Nothing looks inside the garage or at the street.
+    assert cameras_observing(cameras_config, "garage") == []
+    assert cameras_observing(cameras_config, "street") == []
 
     covered = zones_covered_by(cameras_config)
-    assert {"front_entry", "front_porch", "front_walkway"} <= covered
-    assert "backyard" not in covered, "an unobserved zone must not look covered"
+    assert {"front_entry", "front_porch", "front_walkway", "backyard", "cottage"} <= covered
+    assert "garage" not in covered, "an unobserved zone must not look covered"
+    assert "street" not in covered
 
 
 async def test_zone_relations_carry_their_relation_type(session_factory) -> None:

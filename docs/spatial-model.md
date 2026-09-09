@@ -45,16 +45,33 @@ Declared once and stored in both directions when `bidirectional` (the default),
 so either endpoint can be queried. The current property graph:
 
 ```
-   street ── driveway ── front_walkway ── front_porch ── front_entry
-                 │                                        [front_door]
-            garage_entry ── garage  (interior, unobserved)
-           [garage_right]
-                                                  backyard  (unobserved)
+                        street
+                          │
+   garage ─ garage_entry ─ driveway ── front_walkway ── front_porch ── front_entry
+      │    [garage_left]      │              │                          [front_door]
+      │    [garage_right]     │              │
+      │                       │              │
+   garage_side_door ── left_walkway     right_walkway
+                    [left_walkway]      [right_walkway]
+                           │                  │
+                           └──── backyard ────┘
+                              [backyard]  │
+                                  │       └── rear_entry
+                               cottage
+                              [cottage]
 ```
 
-Cameras in brackets sit *at* a zone and look outward from it. `garage_right` is
-mounted on the garage's front-facing wall, so it observes the **driveway** and
-not the garage interior — which is why `garage` stays in `unobserved_zones`.
+Cameras in brackets sit *at* a zone and look outward from it.
+
+`garage_left` and `garage_right` are both mounted on the garage's front-facing
+wall, so they observe the **driveway** and not the garage interior — which is
+why `garage` stays in `unobserved_zones`. Two cameras in one zone is deliberate:
+one person crossing the driveway trips both, and that is a single occurrence, so
+their events correlate into one incident while remaining two distinct events.
+
+The two shed cameras are the opposite case. Both are on the same shed, but they
+face away from each other, so they hold **separate zones** (`backyard` and
+`cottage`). Overlapping hardware does not merge their histories.
 
 **Edges are recorded but deliberately not traversed.** There is no path-finding,
 no plausible-transition scoring, no trajectory estimation. The zone *schema* is

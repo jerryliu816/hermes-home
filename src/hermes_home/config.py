@@ -190,6 +190,11 @@ class CameraConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    #: Other names a person might use for this camera. Home Assistant entity IDs
+    #: outlive the names people actually use -- `camera.driveway` is mounted on
+    #: the garage and is called Garage Left -- so this lets a question phrased
+    #: the old way still resolve. Purely descriptive; nothing routes on it.
+    aliases: list[str] = Field(default_factory=list)
     camera_entity: str | None = None
     event_image_entity: str | None = None
     event_image_strategy: Literal["image_entity_state", "camera_snapshot", "none"] = (

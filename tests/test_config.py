@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -141,7 +142,12 @@ def test_no_private_ip_is_hardcoded_anywhere_committed() -> None:
     Originally this only checked src/, and the addresses leaked into docs and
     docker-compose.yml instead — which is exactly where a reader would copy them
     from. It now covers everything git would commit.
+
+    Candidates are parsed as real addresses rather than pattern-matched: a
+    substring regex flags hash fragments like "10.979" inside uv.lock, and a
+    guard that cries wolf gets switched off.
     """
+    import ipaddress
     import subprocess
 
     tracked = subprocess.run(
@@ -154,7 +160,7 @@ def test_no_private_ip_is_hardcoded_anywhere_committed() -> None:
         if not f.startswith((".env.example",))  # placeholders are documented there
     ]
 
-    pattern = r"\b(192\.168\.|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.)[0-9.]+"
+    quad = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?![\w.])")
     offenders: list[str] = []
     for name in candidates:
         path = REPO_ROOT / name
@@ -164,11 +170,15 @@ def test_no_private_ip_is_hardcoded_anywhere_committed() -> None:
             text = path.read_text(errors="ignore")
         except (OSError, UnicodeDecodeError):
             continue
-        import re
 
         for line_no, line in enumerate(text.splitlines(), 1):
-            if re.search(pattern, line):
-                offenders.append(f"{name}:{line_no}: {line.strip()[:90]}")
+            for match in quad.findall(line):
+                try:
+                    address = ipaddress.ip_address(match)
+                except ValueError:
+                    continue  # "10.979.x.y" and friends are not addresses
+                if address.is_private and not (address.is_loopback or address.is_unspecified):
+                    offenders.append(f"{name}:{line_no}: {line.strip()[:90]}")
 
     assert not offenders, "private IP addresses in committed files:\n  " + "\n  ".join(offenders)
 

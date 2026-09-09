@@ -24,6 +24,17 @@ from hermes_home.storage.repositories import DeliveryRepository
 from hermes_home.vision.mock import MockVisionProvider
 from tests.conftest import OTHER_IMAGE, TINY_IMAGE, FakeHomeAssistant
 
+#: Every camera in the fixture config, which mirrors the real deployment.
+ALL_CAMERAS = {
+    "backyard",
+    "cottage",
+    "front_door",
+    "garage_left",
+    "garage_right",
+    "left_walkway",
+    "right_walkway",
+}
+
 CAMERAS = {
     "front_door": {
         "image_entity": "image.front_door_event_image",
@@ -34,6 +45,32 @@ CAMERAS = {
         "image_entity": "image.garage_right_event_image",
         "event_type": "camera.motion",
         "zone": "garage_entry",
+    },
+    # Entity IDs deliberately keep their pre-rename names.
+    "garage_left": {
+        "image_entity": "image.driveway_event_image",
+        "event_type": "camera.motion",
+        "zone": "garage_entry",
+    },
+    "left_walkway": {
+        "image_entity": "image.left_side_door_event_image",
+        "event_type": "camera.motion",
+        "zone": "left_walkway",
+    },
+    "right_walkway": {
+        "image_entity": "image.right_walkway_event_image",
+        "event_type": "camera.motion",
+        "zone": "right_walkway",
+    },
+    "backyard": {
+        "image_entity": "image.backyard_event_image",
+        "event_type": "camera.motion",
+        "zone": "backyard",
+    },
+    "cottage": {
+        "image_entity": "image.cottage_event_image",
+        "event_type": "camera.motion",
+        "zone": "cottage",
     },
 }
 
@@ -62,6 +99,13 @@ async def _deliver(session_factory, camera: str, *, occurred_at=None) -> str:
         return delivery.uid
 
 
+def _png_variant(index: int) -> bytes:
+    """A distinct but valid image per camera, so nothing is deduped by content."""
+    from tests.conftest import _png
+
+    return _png(4, 3, tag=f"camera-{index}".encode())
+
+
 def _worker(session_factory, settings, cameras_config, ha, vision=None) -> IngestWorker:
     return IngestWorker(
         session_factory=session_factory,
@@ -77,8 +121,17 @@ def _worker(session_factory, settings, cameras_config, ha, vision=None) -> Inges
 # --------------------------------------------------------------------------- #
 
 
-def test_both_cameras_are_configured(cameras_config) -> None:
-    assert set(cameras_config.cameras) == {"front_door", "garage_right"}
+def test_every_camera_is_configured(cameras_config) -> None:
+    assert set(cameras_config.cameras) == {
+        "backyard",
+        "cottage",
+        "front_door",
+        "garage_left",
+        "garage_right",
+        "left_walkway",
+        "right_walkway",
+    }
+
     garage = cameras_config.cameras["garage_right"]
     assert garage.event_image_entity == "image.garage_right_event_image"
     assert garage.camera_entity == "camera.garage_right"
@@ -86,14 +139,48 @@ def test_both_cameras_are_configured(cameras_config) -> None:
     assert garage.location == "garage_entry"
 
 
+def test_every_camera_uses_the_same_retrieval_strategy(cameras_config) -> None:
+    """Nothing is special-cased: every camera goes through one code path."""
+    for key, camera in cameras_config.cameras.items():
+        assert camera.event_image_strategy == "image_entity_state", key
+        assert camera.event_image_entity, key
+        assert camera.camera_entity, key
+
+
+def test_entity_ids_are_unique_across_cameras(cameras_config) -> None:
+    """Two cameras sharing an entity would silently merge their histories."""
+    images = [c.event_image_entity for c in cameras_config.cameras.values()]
+    assert len(images) == len(set(images))
+    cams = [c.camera_entity for c in cameras_config.cameras.values()]
+    assert len(cams) == len(set(cams))
+
+
+def test_renamed_cameras_keep_their_original_entity_ids(cameras_config) -> None:
+    """Home Assistant entity IDs outlive the names people use.
+
+    garage_left and left_walkway were renamed; their entities were not. Aliases
+    carry the old names so a question phrased the old way still resolves.
+    """
+    garage_left = cameras_config.cameras["garage_left"]
+    assert garage_left.camera_entity == "camera.driveway"
+    assert garage_left.event_image_entity == "image.driveway_event_image"
+    assert "driveway" in garage_left.aliases
+
+    left = cameras_config.cameras["left_walkway"]
+    assert left.camera_entity == "camera.left_side_door"
+    assert left.event_image_entity == "image.left_side_door_event_image"
+    assert "left side door" in left.aliases
+
+
 def test_garage_cameras_do_not_claim_to_see_inside_the_garage(cameras_config) -> None:
-    """They are mounted on the garage's outward face, watching the driveway.
+    """Both are mounted on the garage's outward face, watching the driveway.
 
     Claiming otherwise would make an absence of garage events read as an
     all-clear for a space nothing actually watches.
     """
     assert cameras_config.cameras["garage_right"].observes == ["driveway"]
-    assert cameras_observing(cameras_config, "driveway") == ["garage_right"]
+    assert cameras_config.cameras["garage_left"].observes == ["driveway"]
+    assert cameras_observing(cameras_config, "driveway") == ["garage_left", "garage_right"]
     assert cameras_observing(cameras_config, "garage") == []
 
 
@@ -282,11 +369,158 @@ async def test_summary_breaks_down_by_camera_and_zone(mcp_server, two_camera_eve
     assert summary["by_type"] == {"camera.person_detected": 1, "camera.motion": 1}
 
 
-async def test_describe_home_lists_both_cameras_and_their_coverage(mcp_server) -> None:
+async def test_describe_home_lists_every_camera_and_its_coverage(mcp_server) -> None:
     home = await _call(mcp_server, "home_describe_home")
 
     by_key = {c["key"]: c for c in home["cameras"]}
-    assert set(by_key) == {"front_door", "garage_right"}
+    assert set(by_key) == {
+        "backyard",
+        "cottage",
+        "front_door",
+        "garage_left",
+        "garage_right",
+        "left_walkway",
+        "right_walkway",
+    }
     assert by_key["garage_right"]["located_in"] == "garage_entry"
     assert by_key["garage_right"]["observes"] == ["driveway"]
+    assert by_key["backyard"]["located_in"] == "backyard"
+    assert by_key["cottage"]["located_in"] == "cottage"
     assert "garage" in home["unobserved_zones"]
+
+
+async def test_describe_home_exposes_aliases(mcp_server) -> None:
+    """So a question about "the driveway camera" can reach garage_left."""
+    home = await _call(mcp_server, "home_describe_home")
+    by_key = {c["key"]: c for c in home["cameras"]}
+
+    assert "driveway" in by_key["garage_left"]["aliases"]
+    assert "left side door" in by_key["left_walkway"]["aliases"]
+    assert by_key["front_door"]["aliases"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Properties that only appear once there are many cameras
+# --------------------------------------------------------------------------- #
+
+
+async def test_every_camera_ingests_and_lands_in_its_own_zone(
+    session_factory, settings, cameras_config
+) -> None:
+    """The whole fleet through one code path, each event attributable."""
+    base = now_utc() - timedelta(minutes=30)
+    ha = FakeHomeAssistant(image_state_ts=base + timedelta(seconds=5))
+    worker = _worker(session_factory, settings, cameras_config, ha)
+
+    for index, camera in enumerate(sorted(CAMERAS)):
+        # A distinct frame per camera, so nothing is suppressed as duplicate.
+        ha.image = _png_variant(index)
+        ha.image_state_ts = base + timedelta(minutes=index, seconds=5)
+        await _deliver(session_factory, camera, occurred_at=base + timedelta(minutes=index))
+        assert await worker.drain_once(), camera
+
+    async with session_scope(session_factory) as session:
+        rows = (
+            await session.execute(
+                select(Event.source_entity_id, Zone.key).join(Zone, Zone.id == Event.zone_id)
+            )
+        ).all()
+
+    by_entity = dict(rows)
+    assert len(by_entity) == len(CAMERAS), "every camera produced its own event"
+    for camera, spec in CAMERAS.items():
+        assert by_entity[spec["image_entity"]] == spec["zone"], camera
+
+
+async def test_two_cameras_in_one_zone_share_an_incident(
+    session_factory, settings, cameras_config
+) -> None:
+    """garage_left and garage_right both watch the driveway from the same wall.
+
+    One person crossing it trips both, and that is one occurrence, not two --
+    which is exactly what an incident is for. The *events* stay separate; only
+    the incident groups them.
+    """
+    base = now_utc() - timedelta(minutes=5)
+    ha = FakeHomeAssistant(image_state_ts=base + timedelta(seconds=5))
+    worker = _worker(session_factory, settings, cameras_config, ha)
+
+    await _deliver(session_factory, "garage_right", occurred_at=base)
+    await worker.drain_once()
+
+    ha.image = OTHER_IMAGE
+    ha.image_state_ts = base + timedelta(seconds=40)
+    await _deliver(session_factory, "garage_left", occurred_at=base + timedelta(seconds=20))
+    await worker.drain_once()
+
+    async with session_scope(session_factory) as session:
+        events = list((await session.scalars(select(Event))).all())
+        assert len(events) == 2, "two cameras, two distinct events"
+        assert len({e.source_entity_id for e in events}) == 2
+        assert await session.scalar(select(func.count()).select_from(Incident)) == 1
+        assert len({e.incident_id for e in events}) == 1
+
+
+async def test_cameras_in_different_zones_never_share_an_incident(
+    session_factory, settings, cameras_config
+) -> None:
+    """Overlapping views do not merge: the two shed cameras hold distinct zones."""
+    base = now_utc() - timedelta(minutes=5)
+    ha = FakeHomeAssistant(image_state_ts=base + timedelta(seconds=5))
+    worker = _worker(session_factory, settings, cameras_config, ha)
+
+    await _deliver(session_factory, "backyard", occurred_at=base)
+    await worker.drain_once()
+
+    ha.image = OTHER_IMAGE
+    ha.image_state_ts = base + timedelta(seconds=40)
+    await _deliver(session_factory, "cottage", occurred_at=base + timedelta(seconds=10))
+    await worker.drain_once()
+
+    async with session_scope(session_factory) as session:
+        assert await session.scalar(select(func.count()).select_from(Incident)) == 2
+        events = list((await session.scalars(select(Event))).all())
+        assert len({e.incident_id for e in events}) == 2
+
+
+async def test_identical_frames_across_all_cameras_are_not_duplicates(
+    session_factory, settings, cameras_config
+) -> None:
+    """Content dedupe is per source entity, so a shared frame is not suppressed."""
+    base = now_utc() - timedelta(minutes=20)
+    ha = FakeHomeAssistant(image=TINY_IMAGE, image_state_ts=base + timedelta(seconds=5))
+    worker = _worker(session_factory, settings, cameras_config, ha)
+
+    for index, camera in enumerate(sorted(CAMERAS)):
+        ha.image_state_ts = base + timedelta(minutes=index, seconds=5)
+        await _deliver(session_factory, camera, occurred_at=base + timedelta(minutes=index))
+        await worker.drain_once()
+
+    async with session_scope(session_factory) as session:
+        events = list((await session.scalars(select(Event))).all())
+
+    assert len(events) == len(CAMERAS), "the same bytes from different cameras are distinct"
+    assert all(e.duplicate_count == 0 for e in events)
+
+
+async def test_mcp_filters_by_every_camera_key(
+    mcp_server, session_factory, settings, cameras_config
+) -> None:
+    """The logical keys, not the Home Assistant entity names, are the interface."""
+    base = now_utc() - timedelta(minutes=30)
+    ha = FakeHomeAssistant(image_state_ts=base + timedelta(seconds=5))
+    worker = _worker(session_factory, settings, cameras_config, ha)
+
+    for index, camera in enumerate(sorted(CAMERAS)):
+        ha.image = _png_variant(index)
+        ha.image_state_ts = base + timedelta(minutes=index, seconds=5)
+        await _deliver(session_factory, camera, occurred_at=base + timedelta(minutes=index))
+        await worker.drain_once()
+
+    for camera in CAMERAS:
+        result = await _call(mcp_server, "home_recent_events", {"camera": camera})
+        assert result["count"] == 1, camera
+        assert result["events"][0]["camera"] == camera
+
+    summary = await _call(mcp_server, "home_summarize_activity")
+    assert summary["by_camera"] == dict.fromkeys(CAMERAS, 1)

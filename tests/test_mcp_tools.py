@@ -209,7 +209,9 @@ async def test_list_zones_reports_coverage(mcp_server) -> None:
     zones = {z["key"]: z for z in (await call(mcp_server, "home_list_zones"))["zones"]}
 
     assert zones["front_entry"]["observed_by_cameras"] == ["front_door"]
-    assert zones["backyard"]["observed_by_cameras"] == []
+    # Two cameras watch the driveway from the garage's front wall.
+    assert zones["driveway"]["observed_by_cameras"] == ["garage_left", "garage_right"]
+    assert zones["garage"]["observed_by_cameras"] == []
     assert "front_porch" in zones["front_walkway"]["adjacent_to"]
 
 
@@ -218,13 +220,22 @@ async def test_describe_home_flags_unobserved_zones(mcp_server) -> None:
     home = await call(mcp_server, "home_describe_home")
 
     assert home["timezone"]
-    assert {c["key"] for c in home["cameras"]} == {"front_door", "garage_right"}
-    assert "backyard" in home["unobserved_zones"]
-    assert "front_entry" not in home["unobserved_zones"]
+    assert {c["key"] for c in home["cameras"]} == {
+        "backyard",
+        "cottage",
+        "front_door",
+        "garage_left",
+        "garage_right",
+        "left_walkway",
+        "right_walkway",
+    }
     # The garage cameras are mounted on its outward face and see the driveway,
     # not the inside, so the garage itself stays unobserved.
     assert "garage" in home["unobserved_zones"]
+    assert "street" in home["unobserved_zones"]
     assert "driveway" not in home["unobserved_zones"]
+    assert "front_entry" not in home["unobserved_zones"]
+    assert "backyard" not in home["unobserved_zones"]
 
 
 async def test_summarize_activity_is_deterministic_counts_only(mcp_server, stored_event) -> None:

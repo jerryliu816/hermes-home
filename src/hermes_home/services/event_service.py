@@ -145,6 +145,7 @@ class EventService:
                 CameraView(
                     key=key,
                     name=camera.name,
+                    aliases=list(camera.aliases),
                     located_in=camera.location,
                     observes=sorted(camera.observes),
                 )

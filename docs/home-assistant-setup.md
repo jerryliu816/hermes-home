@@ -193,6 +193,28 @@ Pick `event_type` to match what the sensor actually reports: a motion sensor is
 `camera.motion`, a person sensor is `camera.person_detected`. The full list is
 in the section below; an unknown value is rejected with a 422.
 
+### When a camera's entity IDs no longer match its name
+
+Home Assistant entity IDs outlive the names people use. Two cameras here were
+renamed without touching their entities:
+
+| Camera key | Display name | Entities still called |
+|---|---|---|
+| `garage_left` | Garage Left | `camera.driveway`, `image.driveway_event_image` |
+| `left_walkway` | Left Walkway | `camera.left_side_door`, `image.left_side_door_event_image` |
+
+Keep the entity IDs as they are — renaming them in Home Assistant breaks history
+there for no gain. Record the old name under `aliases` in `cameras.yaml`
+instead, and a question phrased the old way still resolves:
+
+```yaml
+garage_left:
+  name: Garage Left
+  aliases: [driveway, driveway camera]
+  camera_entity: camera.driveway
+  event_image_entity: image.driveway_event_image
+```
+
 ## Supported `event_type` values
 
 `camera.motion`, `camera.person_detected`, `camera.vehicle_detected`,

@@ -1,14 +1,21 @@
-# Test fixture: a small property used by the whole suite.
+# Test fixture: mirrors the real deployment's shape (7 cameras, 13 zones).
 #
-# Deliberately NOT the operator's real config/home.yaml -- that file is
-# gitignored, so tests that read it cannot run on a fresh clone. Keeping a
-# fixture here also means the suite's assertions do not shift when someone
-# rearranges their actual house.
+# Deliberately NOT config/home.yaml, which is gitignored and would make the
+# suite unrunnable on a fresh clone. Keeping a copy here also stops test
+# assertions shifting when the actual house is rearranged.
 #
-# Two properties the tests depend on:
-#   - two cameras, in different zones, so multi-camera behaviour is covered
-#   - at least one zone nothing observes (backyard, garage), so the
+# Properties the tests rely on:
+#   - several cameras, in distinct zones, so multi-camera behaviour is covered
+#   - two cameras sharing a zone (garage_entry), so shared-incident behaviour is
+#     exercised deliberately rather than by accident
+#   - zones nothing observes (garage, street, front_porch...), so the
 #     "no coverage" semantics stay tested
+# Non-secret description of the property. Copy to config/home.yaml and edit.
+#
+# Zones are semantic first: the topology below is meaningful without any
+# coordinates. When you later provide a house map, add geometry under a zone's
+# `attributes` (normalized x/y in 0..1, polygons, camera orientation) — no
+# schema change is needed.
 home:
   name: Test Home
 
@@ -28,16 +35,33 @@ home:
     front_entry:
       name: Front Entry
       kind: threshold
-    garage_entry:
-      name: Garage Entry
-      kind: threshold
-    garage:
-      name: Garage
-      kind: interior
     backyard:
       name: Backyard
       kind: exterior
+    garage:
+      name: Garage
+      kind: interior
+    garage_entry:
+      name: Garage Entry
+      kind: threshold
+    left_walkway:
+      name: Left Walkway
+      kind: exterior
+    right_walkway:
+      name: Right Walkway
+      kind: exterior
+    garage_side_door:
+      name: Garage Side Door
+      kind: threshold
+    rear_entry:
+      name: Rear Entry
+      kind: threshold
+    cottage:
+      name: Cottage
+      kind: structure
 
+  # Adjacency is recorded now and deliberately not traversed in v1.
+  # A future correlator can use it without a migration.
   relationships:
     - from: street
       to: driveway
@@ -57,3 +81,128 @@ home:
     - from: garage_entry
       to: garage
       relation: leads_to
+    # Down the left side: driveway past the garage's side door to the backyard.
+    - from: driveway
+      to: left_walkway
+      relation: adjacent
+    - from: left_walkway
+      to: garage_side_door
+      relation: leads_to
+    - from: garage_side_door
+      to: garage
+      relation: leads_to
+    - from: left_walkway
+      to: backyard
+      relation: adjacent
+    # Down the right side: front walkway to the backyard.
+    - from: front_walkway
+      to: right_walkway
+      relation: adjacent
+    - from: right_walkway
+      to: backyard
+      relation: adjacent
+    # Behind the house: sliding doors, and the cottage across the yard.
+    - from: backyard
+      to: rear_entry
+      relation: leads_to
+    - from: backyard
+      to: cottage
+      relation: adjacent
+# Non-secret description of the property. Copy to config/home.yaml and edit.
+#
+# Zones are semantic first: the topology below is meaningful without any
+# coordinates. When you later provide a house map, add geometry under a zone's
+# `attributes` (normalized x/y in 0..1, polygons, camera orientation) — no
+# schema change is needed.
+home:
+  name: Test Home
+
+  zones:
+    street:
+      name: Street
+      kind: exterior
+    driveway:
+      name: Driveway
+      kind: exterior
+    front_walkway:
+      name: Front Walkway
+      kind: exterior
+    front_porch:
+      name: Front Porch
+      kind: exterior
+    front_entry:
+      name: Front Entry
+      kind: threshold
+    backyard:
+      name: Backyard
+      kind: exterior
+    garage:
+      name: Garage
+      kind: interior
+    garage_entry:
+      name: Garage Entry
+      kind: threshold
+    left_walkway:
+      name: Left Walkway
+      kind: exterior
+    right_walkway:
+      name: Right Walkway
+      kind: exterior
+    garage_side_door:
+      name: Garage Side Door
+      kind: threshold
+    rear_entry:
+      name: Rear Entry
+      kind: threshold
+    cottage:
+      name: Cottage
+      kind: structure
+
+  # Adjacency is recorded now and deliberately not traversed in v1.
+  # A future correlator can use it without a migration.
+  relationships:
+    - from: street
+      to: driveway
+      relation: adjacent
+    - from: driveway
+      to: front_walkway
+      relation: adjacent
+    - from: front_walkway
+      to: front_porch
+      relation: leads_to
+    - from: front_porch
+      to: front_entry
+      relation: leads_to
+    - from: driveway
+      to: garage_entry
+      relation: adjacent
+    - from: garage_entry
+      to: garage
+      relation: leads_to
+    # Down the left side: driveway past the garage's side door to the backyard.
+    - from: driveway
+      to: left_walkway
+      relation: adjacent
+    - from: left_walkway
+      to: garage_side_door
+      relation: leads_to
+    - from: garage_side_door
+      to: garage
+      relation: leads_to
+    - from: left_walkway
+      to: backyard
+      relation: adjacent
+    # Down the right side: front walkway to the backyard.
+    - from: front_walkway
+      to: right_walkway
+      relation: adjacent
+    - from: right_walkway
+      to: backyard
+      relation: adjacent
+    # Behind the house: sliding doors, and the cottage across the yard.
+    - from: backyard
+      to: rear_entry
+      relation: leads_to
+    - from: backyard
+      to: cottage
+      relation: adjacent

@@ -1,9 +1,14 @@
-# Test fixture: two cameras, mirroring the real deployment's shape.
+# Test fixture: the same seven cameras as the real deployment.
+# See tests/fixtures/home.yaml for why this is a copy rather than a symlink.
+# Front Door — real entity IDs, verified against Home Assistant.
 #
-# front_door  sits at a threshold and observes the approach to it.
-# garage_right sits at a different threshold and observes the driveway --
-#              notably it does NOT observe `garage`, so a camera being *at*
-#              a place and *seeing into* it stay distinguishable in tests.
+# event_image_strategy:
+#   image_entity_state  Read image.*, whose STATE is a timestamp of the last
+#                       image change. Gives a freshness signal, so we never
+#                       analyze the previous event's frame and file it under
+#                       the current timestamp.
+#   camera_snapshot     No freshness signal — snapshot camera.* directly.
+#   none                Metadata-only event; no image fetched or analyzed.
 cameras:
   front_door:
     name: Front Door
@@ -21,5 +26,66 @@ cameras:
     event_image_entity: image.garage_right_event_image
     event_image_strategy: image_entity_state
     location: garage_entry
+    # Mounted on the garage's front-facing wall, looking outward at the
+    # driveway. It does NOT see inside the garage -- listing `garage` here
+    # would make an absence of events there read as an all-clear.
     observes:
       - driveway
+
+  garage_left:
+    name: Garage Left
+    # The Home Assistant entities keep their original "driveway" names; the
+    # camera is mounted on the garage's front wall, left side. Aliases let a
+    # question phrased the old way still find it.
+    aliases:
+      - driveway
+      - driveway camera
+    camera_entity: camera.driveway
+    event_image_entity: image.driveway_event_image
+    event_image_strategy: image_entity_state
+    location: garage_entry
+    observes:
+      - driveway
+
+  left_walkway:
+    name: Left Walkway
+    # Entities keep their original "left_side_door" names.
+    aliases:
+      - left side door
+      - garage side door
+    camera_entity: camera.left_side_door
+    event_image_entity: image.left_side_door_event_image
+    event_image_strategy: image_entity_state
+    location: left_walkway
+    observes:
+      - garage_side_door
+
+  right_walkway:
+    name: Right Walkway
+    camera_entity: camera.right_walkway
+    event_image_entity: image.right_walkway_event_image
+    event_image_strategy: image_entity_state
+    location: right_walkway
+    observes: []
+
+  backyard:
+    name: Backyard
+    # On the storage shed, aimed back at the main house: covers about half the
+    # yard plus the two sliding doors.
+    camera_entity: camera.backyard
+    event_image_entity: image.backyard_event_image
+    event_image_strategy: image_entity_state
+    location: backyard
+    observes:
+      - rear_entry
+
+  cottage:
+    name: Cottage
+    # Also on the shed, facing the other way. Its own zone rather than
+    # `backyard`, so its events stay distinct from the backyard camera's
+    # instead of correlating into shared incidents.
+    camera_entity: camera.cottage
+    event_image_entity: image.cottage_event_image
+    event_image_strategy: image_entity_state
+    location: cottage
+    observes: []

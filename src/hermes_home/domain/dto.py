@@ -83,6 +83,10 @@ class CameraView(BaseModel):
 
     key: str
     name: str
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Other names for this camera, e.g. an older name still used in speech.",
+    )
     located_in: str
     observes: list[str] = Field(default_factory=list)
 

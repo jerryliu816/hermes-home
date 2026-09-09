@@ -32,6 +32,21 @@ home:
     garage_entry:
       name: Garage Entry
       kind: threshold
+    left_walkway:
+      name: Left Walkway
+      kind: exterior
+    right_walkway:
+      name: Right Walkway
+      kind: exterior
+    garage_side_door:
+      name: Garage Side Door
+      kind: threshold
+    rear_entry:
+      name: Rear Entry
+      kind: threshold
+    cottage:
+      name: Cottage
+      kind: structure
 
   # Adjacency is recorded now and deliberately not traversed in v1.
   # A future correlator can use it without a migration.
@@ -54,3 +69,30 @@ home:
     - from: garage_entry
       to: garage
       relation: leads_to
+    # Down the left side: driveway past the garage's side door to the backyard.
+    - from: driveway
+      to: left_walkway
+      relation: adjacent
+    - from: left_walkway
+      to: garage_side_door
+      relation: leads_to
+    - from: garage_side_door
+      to: garage
+      relation: leads_to
+    - from: left_walkway
+      to: backyard
+      relation: adjacent
+    # Down the right side: front walkway to the backyard.
+    - from: front_walkway
+      to: right_walkway
+      relation: adjacent
+    - from: right_walkway
+      to: backyard
+      relation: adjacent
+    # Behind the house: sliding doors, and the cottage across the yard.
+    - from: backyard
+      to: rear_entry
+      relation: leads_to
+    - from: backyard
+      to: cottage
+      relation: adjacent
