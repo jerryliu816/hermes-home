@@ -547,6 +547,23 @@ def test_backyard_is_covered_but_only_partly(cameras_config) -> None:
     assert "backyard" in zones_partially_covered_by(cameras_config)
 
 
+def test_two_partial_views_do_not_add_up_to_full_coverage(cameras_config) -> None:
+    """Both shed cameras see part of the yard and a piece is in neither's view.
+
+    The south camera looks toward the house, the north one toward the cottage.
+    Counting two partial views as full would produce a confident all-clear over
+    exactly the strip nothing watches -- the failure this whole notion exists to
+    prevent.
+    """
+    from hermes_home.spatial import cameras_observing, coverage_of
+
+    assert cameras_observing(cameras_config, "backyard") == ["backyard", "cottage"]
+    assert coverage_of(cameras_config, "backyard") == "partial"
+
+    for key in ("backyard", "cottage"):
+        assert "backyard" in cameras_config.cameras[key].partial_coverage, key
+
+
 def test_fully_covered_zones_are_not_reported_as_partial(cameras_config) -> None:
     from hermes_home.spatial import zones_partially_covered_by
 
@@ -620,6 +637,9 @@ async def test_query_results_carry_zone_coverage(mcp_server) -> None:
     partial = await _call(mcp_server, "home_recent_events", {"zone": "backyard"})
     assert partial["zone_coverage"]["status"] == "partial"
     assert "weaker evidence" in partial["zone_coverage"]["note"]
+    # Naming the cameras makes the gap concrete rather than abstract.
+    assert partial["zone_coverage"]["cameras"] == ["backyard", "cottage"]
+    assert "no camera's view" in partial["zone_coverage"]["note"]
 
     none = await _call(mcp_server, "home_recent_events", {"zone": "garage"})
     assert none["zone_coverage"]["status"] == "none"

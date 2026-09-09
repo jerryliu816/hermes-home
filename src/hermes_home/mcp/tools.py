@@ -25,7 +25,7 @@ from pydantic import Field
 from hermes_home.api.deps import AppState
 from hermes_home.core.time import ensure_utc, now_utc, parse_ha_timestamp
 from hermes_home.services.event_service import MAX_LIMIT, EventService
-from hermes_home.spatial import coverage_of
+from hermes_home.spatial import cameras_observing, coverage_of
 from hermes_home.storage.engine import session_scope
 
 logger = structlog.get_logger(__name__)
@@ -47,18 +47,26 @@ def _coverage_note(state: AppState, zone: str | None) -> dict[str, Any] | None:
     if not zone:
         return None
     status = coverage_of(state.cameras, zone)
-    note = {
-        "none": (
+    watching = cameras_observing(state.cameras, zone)
+    named = ", ".join(watching)
+
+    if status == "none":
+        note = (
             f"No camera watches {zone}. An absence of events says nothing about what "
             "happened there."
-        ),
-        "partial": (
-            f"Only part of {zone} is in view of a camera. An absence of events is "
-            "weaker evidence here than in a fully covered zone."
-        ),
-        "full": f"{zone} is fully covered by at least one camera.",
-    }[status]
-    return {"zone": zone, "status": status, "note": note}
+        )
+    elif status == "partial":
+        several = len(watching) > 1
+        note = (
+            f"{'Cameras' if several else 'Camera'} {named} "
+            f"{'cover' if several else 'covers'} only part of {zone}; some of it is in "
+            "no camera's view. An absence of events is weaker evidence here than in a "
+            "fully covered zone."
+        )
+    else:
+        note = f"{zone} is fully covered by {named}."
+
+    return {"zone": zone, "status": status, "cameras": watching, "note": note}
 
 
 def register_tools(mcp: Any, state: AppState) -> None:

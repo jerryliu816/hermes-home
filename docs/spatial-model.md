@@ -121,6 +121,13 @@ Startup rejects a `partial_coverage` entry naming a zone the camera does not
 cover at all, and full coverage by any other camera wins — adding a camera can
 never make the reported coverage more pessimistic.
 
+**Two partial views do not add up to a full one.** The shed carries two cameras:
+the south one looks toward the house, the north one toward the cottage, and a
+strip of the yard is in neither field of view. Both declare
+`partial_coverage: [backyard]`, so the zone stays `partial` no matter how many
+cameras point at it. Treating two partial views as full would produce a
+confident all-clear over exactly the strip nothing watches.
+
 `home_describe_home` reports `partially_observed_zones` alongside
 `unobserved_zones`, and every zone-filtered query result carries a
 `zone_coverage` block. The second one matters more in practice: an agent asked

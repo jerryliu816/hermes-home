@@ -86,11 +86,18 @@ cameras:
 
   cottage:
     name: Cottage
-    # Also on the shed, facing the other way. Its own zone rather than
-    # `backyard`, so its events stay distinct from the backyard camera's
-    # instead of correlating into shared incidents.
+    # North edge of the shed, facing away from the house toward the cottage.
+    # Its own zone rather than `backyard`, so its events stay distinct from the
+    # backyard camera's instead of correlating into shared incidents.
+    #
+    # It also catches the far part of the yard, but between the two shed
+    # cameras a portion of the backyard is in neither field of view -- hence
+    # partial here too, so the yard never reports as fully covered.
     camera_entity: camera.cottage
     event_image_entity: image.cottage_event_image
     event_image_strategy: image_entity_state
     location: cottage
-    observes: []
+    observes:
+      - backyard
+    partial_coverage:
+      - backyard
