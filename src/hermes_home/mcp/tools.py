@@ -167,7 +167,13 @@ def register_tools(mcp: Any, state: AppState) -> None:
                 tags=tags,
                 limit=limit,
             )
-        logger.info("mcp.home_search_events", returned=len(events))
+        logger.info(
+            "mcp.home_search_events",
+            returned=len(events),
+            camera=camera,
+            zone=zone,
+            event_type=event_type,
+        )
         return {"count": len(events), "events": [e.model_dump(mode="json") for e in events]}
 
     @mcp.tool(
