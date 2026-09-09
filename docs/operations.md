@@ -175,6 +175,27 @@ shorter cadence rather than running a scheduler per job:
 | Close settled incidents and summarize them | 60s | `INCIDENT_SWEEP_INTERVAL_SECONDS` |
 | Prune raw webhook bodies past retention | hourly | `RETENTION_SWEEP_INTERVAL_SECONDS` |
 
+The camera health monitor runs as a **separate** task, not part of that loop:
+health must keep being observed while ingestion is idle, and a failure in one
+must not affect the other.
+
+| Job | Default cadence | Setting |
+|---|---|---|
+| Poll camera availability | 60s | `CAMERA_HEALTH_INTERVAL_SECONDS` |
+
+It logs only transitions, never successful polls:
+
+```console
+$ make logs | grep health_changed
+  camera.health_changed  camera=backyard old_status=healthy new_status=offline reason=camera_entity_unavailable
+  home_assistant.health_changed  old_status=reachable new_status=unreachable
+```
+
+Restarting hermes-home deliberately leaves a gap in the coverage record for the
+time it was down, reported as `unknown` rather than being papered over. See
+[camera-health.md](camera-health.md).
+
+
 An incident is closed once it has been idle for `INCIDENT_IDLE_SECONDS`
 (default 120, matching the correlation window). Closing only sets `status`,
 `summary` and `updated_at` — event membership is never touched — and the sweep

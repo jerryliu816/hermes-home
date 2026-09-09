@@ -25,6 +25,8 @@ EXPECTED_TOOLS = {
     "home_list_zones",
     "home_describe_home",
     "home_summarize_activity",
+    "home_list_cameras",
+    "home_coverage",
 }
 
 

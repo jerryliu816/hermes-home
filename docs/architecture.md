@@ -158,11 +158,12 @@ api/        HTTP transport: webhook, health, readiness
 mcp/        MCP transport: server + tool definitions
 services/   read-side logic, shared by both transports so they cannot drift
 ingest/     pipeline, worker, dedupe, freshness, correlation, retention
+health/     camera health monitor, historical coverage algebra
 storage/    models, engine, repositories, migrations
 clients/    outbound adapters (home_assistant; a future tesla.py is a peer)
 vision/     provider protocol, mock, anthropic, prompts
 domain/     payloads, observations, DTOs, event-type registry
-spatial.py  zones and queries
+spatial.py  zones and queries (where cameras POINT; health/ covers whether they WORK)
 core/       time, ids, errors
 ```
 

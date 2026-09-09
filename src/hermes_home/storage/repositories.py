@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hermes_home.core.ids import new_uid
 from hermes_home.core.time import ensure_utc, now_utc
 from hermes_home.storage.models import (
+    CameraHealth,
+    CameraHealthInterval,
     DeliveryStatus,
     Event,
     EventAnalysis,
@@ -336,3 +338,124 @@ class IncidentRepository:
     async def delete_all(self) -> None:
         """Incidents are derived and disposable; improving the rule means recomputing."""
         await self._session.execute(delete(Incident))
+
+
+class CameraHealthRepository:
+    """Current camera health, and the interval history behind it.
+
+    The two are written together but obey different rules: the current row is
+    debounced so a single dropped request does not announce an outage, while
+    the interval history is eager and records every adverse observation. That
+    asymmetry is the point -- debouncing history would let a real outage vanish
+    from the record, which is the one thing this must never do.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    # ----------------------------------------------------------------- #
+    # Current
+
+    async def get(self, camera_key: str) -> CameraHealth | None:
+        return await self._session.get(CameraHealth, camera_key)
+
+    def add_current(self, row: CameraHealth) -> None:
+        """Register a newly created current-health row."""
+        self._session.add(row)
+
+    async def all_current(self) -> list[CameraHealth]:
+        return list(
+            (
+                await self._session.scalars(select(CameraHealth).order_by(CameraHealth.camera_key))
+            ).all()
+        )
+
+    # ----------------------------------------------------------------- #
+    # History
+
+    async def open_interval(self, camera_key: str) -> CameraHealthInterval | None:
+        """The interval still in progress for this camera, if any."""
+        return await self._session.scalar(
+            select(CameraHealthInterval)
+            .where(
+                CameraHealthInterval.camera_key == camera_key,
+                CameraHealthInterval.ended_at.is_(None),
+            )
+            .order_by(CameraHealthInterval.started_at.desc())
+            .limit(1)
+        )
+
+    async def start_interval(
+        self,
+        *,
+        camera_key: str,
+        status: str,
+        reason: str | None,
+        at: datetime,
+    ) -> CameraHealthInterval:
+        interval = CameraHealthInterval(
+            camera_key=camera_key,
+            status=status,
+            reason=reason,
+            started_at=ensure_utc(at),
+            ended_at=None,
+            observed_through=ensure_utc(at),
+        )
+        self._session.add(interval)
+        await self._session.flush()
+        return interval
+
+    async def close_interval(
+        self, interval: CameraHealthInterval, *, at: datetime | None = None
+    ) -> None:
+        """End an interval.
+
+        ``at`` is the moment observation continued to -- pass it only when we
+        were genuinely still watching, in which case the status held right up to
+        the poll that saw it change. Omit it after any break in observation:
+        closing at "now" then would claim we kept watching across a gap, which
+        is exactly the fabricated continuity this schema exists to prevent.
+
+        Never earlier than ``observed_through``, since that much is confirmed.
+        """
+        end = ensure_utc(at) if at is not None else interval.observed_through
+        interval.ended_at = max(end, interval.observed_through, ensure_utc(interval.started_at))
+
+    async def extend_interval(self, interval: CameraHealthInterval, *, at: datetime) -> None:
+        """Confirm the interval's status is still current as of ``at``."""
+        interval.observed_through = ensure_utc(at)
+
+    async def intervals_for(
+        self, camera_key: str, *, start: datetime, end: datetime
+    ) -> list[CameraHealthInterval]:
+        """Every interval overlapping [start, end], in chronological order.
+
+        An open interval (ended_at NULL) is included whenever it began before
+        the window ends; how much of it is actually *confirmed* is decided by
+        the coverage algebra reading ``observed_through``, not here.
+        """
+        start, end = ensure_utc(start), ensure_utc(end)
+        return list(
+            (
+                await self._session.scalars(
+                    select(CameraHealthInterval)
+                    .where(
+                        CameraHealthInterval.camera_key == camera_key,
+                        CameraHealthInterval.started_at <= end,
+                        or_(
+                            CameraHealthInterval.ended_at.is_(None),
+                            CameraHealthInterval.ended_at >= start,
+                        ),
+                    )
+                    .order_by(CameraHealthInterval.started_at)
+                )
+            ).all()
+        )
+
+    async def first_observed_at(self, camera_key: str) -> datetime | None:
+        """This camera's observation boundary; None if never monitored."""
+        return await self._session.scalar(
+            select(func.min(CameraHealthInterval.started_at)).where(
+                CameraHealthInterval.camera_key == camera_key
+            )
+        )

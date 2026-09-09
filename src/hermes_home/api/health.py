@@ -82,6 +82,18 @@ async def ready(
         "concurrency": state.settings.ingest_worker_concurrency,
     }
 
+    # The health monitor, when enabled. Deliberately only "is the task alive" --
+    # never HA reachability and never a camera's status. An unplugged camera or
+    # a rebooting Home Assistant would otherwise make us unready and, through
+    # the container healthcheck, drive a restart loop over exactly the condition
+    # this service is designed to keep running through.
+    if state.settings.camera_health_enabled:
+        monitor = state.health_monitor
+        checks["camera_health"] = {
+            "ok": monitor is not None and monitor.running,
+            "interval_seconds": state.settings.camera_health_interval_seconds,
+        }
+
     # MCP is how Hermes reads any of this.
     checks["mcp"] = {"ok": state.mcp_mounted, "path": "/mcp"}
 

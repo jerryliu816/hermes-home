@@ -101,6 +101,18 @@ cameras:
 Cross-references are validated at startup: a camera pointing at a zone that does
 not exist fails immediately, naming the typo, rather than at 3am on a real event.
 
+## Coverage here is about field of view, not about working cameras
+
+Everything in this document describes where cameras **point** — a static fact
+that changes when you remount one. Whether a camera was actually **working**
+during some period is a separate axis, recorded separately, and documented in
+[camera-health.md](camera-health.md). The two are never merged: a zone can be
+fully covered by a camera that has been offline all week.
+
+One consequence for camera keys: once health history exists, the key a camera is
+filed under in `cameras.yaml` is a permanent identifier. Renaming it orphans
+that camera's recorded history. Change `name`, or add an `aliases` entry.
+
 ## Coverage is three-valued, not two
 
 A zone is `full`, `partial` or `none`. The middle case matters: the backyard

@@ -63,8 +63,9 @@ have to:
 4. **Throws the image away**, keeping the interpretation.
 5. **Files it in place and time**: which zone, which camera, what else was
    happening nearby.
-6. **Exposes it to an agent** as six deterministic tools, so plain-language
-   questions become real queries against real observations.
+6. **Exposes it to an agent** as eight deterministic tools, so plain-language
+   questions become real queries against real observations — each answer
+   carrying whether the cameras behind it were actually working.
 
 ## What that buys you
 
@@ -87,6 +88,12 @@ and one you cannot.
 **It knows what it cannot see.** Zones no camera watches are recorded as such,
 so "no events in the backyard" is reported as *no coverage there*, never as an
 all-clear.
+
+**It knows when it was not looking.** Camera health is polled and kept as
+history, so a quiet night and a camera that was offline from 3:17 to 5:42 are
+different answers. Periods before monitoring began, or while the service was
+down, come back as *unknown* — never as "all clear". Absence of an outage record
+is never treated as evidence of health.
 
 **Privacy by construction, not by policy.** Images are analyzed and discarded —
 what persists is a description. There is no facial recognition, no biometric
@@ -246,7 +253,7 @@ once volume grows.
 ## Development
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 90 tests, no network, no credentials
+.venv/bin/python -m pytest tests/ -q      # 276 tests, no network, no credentials
 .venv/bin/ruff check src/ tests/
 .venv/bin/ruff format src/ tests/
 ```
@@ -262,6 +269,7 @@ broken migration fails the tests instead of surfacing at deploy time.
 | [operations.md](docs/operations.md) | start/stop/upgrade/rollback/backup/restore |
 | [threat-model.md](docs/threat-model.md) | assets, controls, and stated limitations |
 | [spatial-model.md](docs/spatial-model.md) | zones, coverage, adding a camera |
+| [camera-health.md](docs/camera-health.md) | camera health, historical coverage, why unknown is not false |
 | [mcp-tools.md](docs/mcp-tools.md) | the tool contract Hermes depends on |
 | [home-assistant-setup.md](docs/home-assistant-setup.md) | automation and entity wiring |
 | [camera-event-images.md](docs/camera-event-images.md) | measured Eufy timing and resolution |
@@ -272,11 +280,11 @@ authentication (`test_webhook_api.py`).
 
 ## MCP
 
-Hermes reaches the semantic history through six deterministic tools —
+Hermes reaches the semantic history through eight deterministic tools —
 `home_recent_events`, `home_search_events`, `home_get_event`, `home_list_zones`,
-`home_describe_home`, `home_summarize_activity`. None of them calls a language
-model, and none duplicates Hermes' existing Home Assistant tools. See
-[docs/mcp-tools.md](docs/mcp-tools.md).
+`home_describe_home`, `home_summarize_activity`, `home_list_cameras`,
+`home_coverage`. None of them calls a language model, and none duplicates
+Hermes' existing Home Assistant tools. See [docs/mcp-tools.md](docs/mcp-tools.md).
 
 ```bash
 hermes mcp add hermes-home --url http://localhost:8099/mcp/
@@ -311,6 +319,7 @@ LAN address for Home Assistant — never `0.0.0.0`, and never to the internet.
 - [x] Temporal query primitives
 - [x] MCP tools for Hermes
 - [x] Docker packaging and deployment
-- [ ] Multi-camera rollout (configuration, not code)
+- [x] Multi-camera rollout (configuration, not code)
+- [x] Camera health and historical coverage
 - [ ] Incident correlation across zones
 - [ ] Powerwall / energy events

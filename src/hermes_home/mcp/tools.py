@@ -42,6 +42,28 @@ def _parse_time(value: str | None, *, field: str) -> datetime | None:
         ) from exc
 
 
+async def _coverage(
+    svc: EventService,
+    *,
+    start: datetime | None,
+    end: datetime | None,
+    camera: str | None,
+    zone: str | None,
+) -> dict[str, Any] | None:
+    """Operational coverage for a bounded, place-filtered query.
+
+    Attached automatically rather than left to a separate call: the caller must
+    not be able to read ``events: []`` as "nothing happened" without also seeing
+    whether anything was watching. Requiring a second tool call to learn that
+    guarantees it will sometimes be skipped, and the one time it is skipped is
+    the time it mattered.
+    """
+    if start is None or end is None or (camera is None and zone is None):
+        return None
+    view = await svc.coverage_for(start=start, end=end, camera=camera, zone=zone)
+    return view.model_dump(mode="json") if view else None
+
+
 def _coverage_note(state: AppState, zone: str | None) -> dict[str, Any] | None:
     """Describe how well a zone is watched, for attaching to a query result."""
     if not zone:
@@ -97,7 +119,12 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "an ordinary 'what happened' question return nothing.\n\n"
             "If the result is empty it reports latest_event_at and a hint naming the "
             "exact `minutes` value that reaches the most recent event - follow it rather "
-            "than concluding there is no data or looking somewhere else."
+            "than concluding there is no data or looking somewhere else.\n\n"
+            "When camera or zone is given, a `coverage` block says whether those cameras "
+            "were actually WORKING during the window. Never report an empty result as "
+            "'nothing happened' without checking it: coverage.complete false means a "
+            "camera was down, and null means nobody was recording health then. Both are "
+            "different from 'all quiet'."
         ),
     )
     async def home_recent_events(
@@ -119,6 +146,8 @@ def register_tools(mcp: Any, state: AppState) -> None:
     ) -> dict[str, Any]:
         async with session_scope(state.session_factory) as session:
             svc = service(session)
+            window_end = now_utc()
+            window_start = window_end - timedelta(minutes=minutes)
             events = await svc.recent_events(minutes=minutes, camera=camera, zone=zone, limit=limit)
             result: dict[str, Any] = {
                 "window_minutes": minutes,
@@ -128,6 +157,11 @@ def register_tools(mcp: Any, state: AppState) -> None:
             coverage = _coverage_note(state, zone)
             if coverage:
                 result["zone_coverage"] = coverage
+            operational = await _coverage(
+                svc, start=window_start, end=window_end, camera=camera, zone=zone
+            )
+            if operational:
+                result["coverage"] = operational
             if not events:
                 # An empty window is the moment a caller is most likely to give
                 # up on this tool and go looking elsewhere. Say what does exist.
@@ -173,7 +207,11 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "Times are ISO 8601 and must carry a UTC offset (2026-09-08T15:00:00Z). "
             "event_type matches by prefix, so 'camera.' matches every camera event. "
             "Tags are ANDed; available tags include person_present, package_present, "
-            "vehicle_present, animal_present."
+            "vehicle_present, animal_present.\n\n"
+            "When the search is time-bounded AND filtered by camera or zone, a `coverage` "
+            "block reports whether those cameras were working across that period. An "
+            "empty event list with coverage.complete false or null does NOT mean nothing "
+            "happened - say what was actually unobserved."
         ),
     )
     async def home_search_events(
@@ -197,7 +235,8 @@ def register_tools(mcp: Any, state: AppState) -> None:
             raise ValueError("start_time must not be after end_time")
 
         async with session_scope(state.session_factory) as session:
-            events = await service(session).search_events(
+            svc = service(session)
+            events = await svc.search_events(
                 start=start,
                 end=end,
                 camera=camera,
@@ -206,6 +245,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
                 tags=tags,
                 limit=limit,
             )
+            operational = await _coverage(svc, start=start, end=end, camera=camera, zone=zone)
         logger.info(
             "mcp.home_search_events",
             returned=len(events),
@@ -220,6 +260,8 @@ def register_tools(mcp: Any, state: AppState) -> None:
         coverage = _coverage_note(state, zone)
         if coverage:
             result["zone_coverage"] = coverage
+        if operational:
+            result["coverage"] = operational
         return result
 
     @mcp.tool(
@@ -262,6 +304,10 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "The layout of the property: zones, their relationships, the cameras and what "
             "each observes, and which zones nothing watches. Use for 'what can you see?', "
             "'which cameras are there?', 'is the backyard covered?'\n\n"
+            "Each camera reports current_health alongside what it observes. These are "
+            "different facts: observes/partial_coverage say where a camera POINTS, "
+            "current_health says whether it is WORKING. A camera can be configured to "
+            "watch the backyard and be offline right now.\n\n"
             "Two fields qualify what silence means. unobserved_zones: no camera "
             "watches it at all, so an absence of events says nothing about what "
             "happened. partially_observed_zones: a camera sees only part of it, so an "
@@ -275,6 +321,92 @@ def register_tools(mcp: Any, state: AppState) -> None:
         return home.model_dump(mode="json")
 
     @mcp.tool(
+        name="home_list_cameras",
+        title="List cameras and their health",
+        description=(
+            "Every camera, what it watches, and whether it is CURRENTLY WORKING. Use for "
+            "'are all my cameras working?', 'which cameras are offline?', 'is the "
+            "backyard camera up?', 'when did the driveway camera last see anything?'\n\n"
+            "status is healthy | degraded | offline | unknown. unknown genuinely means "
+            "not determinable - Home Assistant unreachable, monitoring disabled, or the "
+            "health data gone stale (see `reason`) - and must never be reported as "
+            "working. degraded means reachable but its event-image entity is "
+            "unavailable, so it would not produce an analyzable frame.\n\n"
+            "last_event_at is NOT a health signal. A camera with no events for days may "
+            "be perfectly healthy in a quiet week; do not infer a fault from silence.\n\n"
+            "This is current state. For whether a camera was working during some past "
+            "period, use home_coverage."
+        ),
+    )
+    async def home_list_cameras(
+        camera: Annotated[
+            str | None, Field(description="One camera key; omit for all of them.")
+        ] = None,
+    ) -> dict[str, Any]:
+        async with session_scope(state.session_factory) as session:
+            views = await service(session).camera_health(camera)
+        if camera is not None and not views:
+            return {"count": 0, "cameras": [], "error": f"no camera configured as {camera!r}"}
+        by_status: dict[str, int] = {}
+        for view in views:
+            by_status[view.status] = by_status.get(view.status, 0) + 1
+        logger.info("mcp.home_list_cameras", returned=len(views), camera=camera)
+        return {
+            "count": len(views),
+            "by_status": by_status,
+            "cameras": [v.model_dump(mode="json") for v in views],
+        }
+
+    @mcp.tool(
+        name="home_coverage",
+        title="Historical camera coverage",
+        description=(
+            "Whether a camera or zone was actually being WATCHED during a past period. "
+            "Use to qualify any negative answer about the past: 'did I have coverage of "
+            "the backyard last night?', 'was the driveway camera up between 2 and 6 AM?', "
+            "'can I trust that nothing happened out back?'\n\n"
+            "complete is three-valued and the difference matters:\n"
+            "  true  - confirmed watched throughout\n"
+            "  false - a known gap; see coverage_gaps\n"
+            "  null  - CANNOT BE DETERMINED, not 'fine'. Health was not being recorded "
+            "then: before this feature was deployed, while the service was down, or "
+            "while Home Assistant was unreachable. Never report null as an all-clear.\n\n"
+            "For a zone, complete true means AT LEAST ONE camera covering that zone was "
+            "working throughout - not that all of them were. field_of_view is a separate "
+            "fact about where cameras point, and may still be partial or none even when "
+            "coverage is complete: the equipment worked, but it never saw all of the area."
+        ),
+    )
+    async def home_coverage(
+        start_time: Annotated[str, Field(description="Inclusive start, ISO 8601 with offset.")],
+        end_time: Annotated[str, Field(description="Inclusive end, ISO 8601 with offset.")],
+        camera: Annotated[str | None, Field(description="Camera key. One of camera/zone.")] = None,
+        zone: Annotated[str | None, Field(description="Zone key. One of camera/zone.")] = None,
+    ) -> dict[str, Any]:
+        start = _parse_time(start_time, field="start_time")
+        end = _parse_time(end_time, field="end_time")
+        if start is None or end is None:
+            raise ValueError("both start_time and end_time are required")
+        if start > end:
+            raise ValueError("start_time must not be after end_time")
+        if (camera is None) == (zone is None):
+            # Returned rather than raised: the server hides exception text, and
+            # a caller that cannot see what it got wrong cannot correct it.
+            return {
+                "error": "give exactly one of camera or zone",
+                "coverage": None,
+            }
+
+        async with session_scope(state.session_factory) as session:
+            view = await service(session).coverage_for(
+                start=start, end=end, camera=camera, zone=zone
+            )
+        if view is None:
+            return {"error": f"no camera configured as {camera!r}", "coverage": None}
+        logger.info("mcp.home_coverage", camera=camera, zone=zone, complete=view.complete)
+        return view.model_dump(mode="json")
+
+    @mcp.tool(
         name="home_summarize_activity",
         title="Summarize home activity",
         description=(
@@ -283,7 +415,10 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "today's activity', 'What happened around the house today?', 'How many "
             "events happened this morning?', 'How busy was the front door this week?'\n\n"
             "Defaults to the last 24 hours. Returns structured counts only, never prose "
-            "- write the narrative yourself from these numbers."
+            "- write the narrative yourself from these numbers.\n\n"
+            "With a zone or camera, a `coverage` block reports whether those cameras were "
+            "working across the period. A count of zero with incomplete coverage is not a "
+            "quiet period; disclose the gap."
         ),
     )
     async def home_summarize_activity(
@@ -292,6 +427,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
         ] = None,
         end_time: Annotated[str | None, Field(description="ISO 8601. Defaults to now.")] = None,
         zone: Annotated[str | None, Field(description="Restrict to one zone key.")] = None,
+        camera: Annotated[str | None, Field(description="Restrict to one camera key.")] = None,
         limit: Annotated[int, Field(ge=1, le=MAX_LIMIT)] = 100,
     ) -> dict[str, Any]:
         end = _parse_time(end_time, field="end_time") or now_utc()
@@ -300,8 +436,18 @@ def register_tools(mcp: Any, state: AppState) -> None:
             raise ValueError("start_time must not be after end_time")
 
         async with session_scope(state.session_factory) as session:
-            summary = await service(session).summarize_activity(
+            svc = service(session)
+            summary = await svc.summarize_activity(
                 start=ensure_utc(start), end=ensure_utc(end), zone=zone, limit=limit
             )
-        logger.info("mcp.home_summarize_activity", event_count=summary.event_count)
-        return summary.model_dump(mode="json")
+            operational = await _coverage(
+                svc, start=ensure_utc(start), end=ensure_utc(end), camera=camera, zone=zone
+            )
+        logger.info("mcp.home_summarize_activity", event_count=summary.event_count, zone=zone)
+        result = summary.model_dump(mode="json")
+        note = _coverage_note(state, zone)
+        if note:
+            result["zone_coverage"] = note
+        if operational:
+            result["coverage"] = operational
+        return result

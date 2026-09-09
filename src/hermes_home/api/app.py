@@ -23,6 +23,7 @@ from hermes_home.config import (
     load_home_config,
     validate_home_and_cameras,
 )
+from hermes_home.health.monitor import CameraHealthMonitor
 from hermes_home.ingest.worker import IngestWorker
 from hermes_home.observability.logging import configure_logging
 from hermes_home.spatial import seed_home
@@ -85,6 +86,12 @@ async def build_state(settings: Settings, *, start_worker: bool = True) -> AppSt
             ha_client=state.ha_client,
             vision=state.vision,
         )
+        state.health_monitor = CameraHealthMonitor(
+            session_factory=session_factory,
+            settings=settings,
+            cameras=cameras,
+            ha_client=state.ha_client,
+        )
     return state
 
 
@@ -98,6 +105,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.app_state = state
         if state.worker is not None:
             await state.worker.start()
+        if state.health_monitor is not None:
+            await state.health_monitor.start()
 
         state.mcp_mounted = bool(getattr(app.state, "mcp_mounted", False))
         mcp = getattr(app.state, "mcp_server", None)
@@ -117,6 +126,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 async with mcp.session_manager.run():
                     yield
         finally:
+            if state.health_monitor is not None:
+                await state.health_monitor.stop()
             if state.worker is not None:
                 await state.worker.stop()
             await state.ha_client.aclose()

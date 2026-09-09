@@ -13,6 +13,7 @@ from hermes_home.config import CamerasConfig, HomeConfig, Settings
 from hermes_home.vision.base import VisionProvider
 
 if TYPE_CHECKING:
+    from hermes_home.health.monitor import CameraHealthMonitor
     from hermes_home.ingest.worker import IngestWorker
 
 
@@ -28,6 +29,9 @@ class AppState:
     ha_client: HomeAssistantClient
     vision: VisionProvider
     worker: IngestWorker | None = None
+    #: Runs independently of the ingest worker: health must keep being observed
+    #: while ingestion is idle, and a failure in one must not affect the other.
+    health_monitor: CameraHealthMonitor | None = None
     #: Alembic revision the running code expects; readiness compares the
     #: database against it so a half-applied upgrade is visible rather than
     #: silently serving against the wrong schema.

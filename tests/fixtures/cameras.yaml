@@ -2,6 +2,15 @@
 # See tests/fixtures/home.yaml for why this is a copy rather than a symlink.
 # Front Door — real entity IDs, verified against Home Assistant.
 #
+# THE KEY OF EACH CAMERA IS PERMANENT. Once health history exists it is the join
+# key for every recorded interval, so renaming it orphans that camera's entire
+# history and presents the new key as never-monitored. Change `name` or add an
+# `aliases` entry instead.
+#
+# health_entity / health_healthy_states (both optional) let health be judged
+# from a connectivity sensor's STATE rather than entity availability. See
+# config/cameras.example.yaml for when that is needed and how to verify it.
+#
 # event_image_strategy:
 #   image_entity_state  Read image.*, whose STATE is a timestamp of the last
 #                       image change. Gives a freshness signal, so we never

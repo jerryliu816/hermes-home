@@ -77,12 +77,73 @@ Property layout plus `unobserved_zones` — the zones no camera watches. This
 field exists so an agent can distinguish *nothing was recorded* from *nothing
 happened*.
 
-### `home_summarize_activity(start_time, end_time, zone, limit=100)`
+Each camera also carries `current_health` and `health_checked_at`, kept distinct
+from `observes` and `partial_coverage`. Those say where a camera **points**;
+`current_health` says whether it is **working**. A camera can be configured to
+watch the backyard and be offline right now, and conflating the two is how a
+dead camera reads as a quiet yard.
+
+### `home_summarize_activity(start_time, end_time, zone, camera, limit=100)`
 
 Deterministic tallies for a window: counts by type, zone, camera and tag, an
 incident count, and the events in chronological order. Structured counts only,
 never prose. `note` is set when the result was truncated, so a partial tally is
 never silently reported as complete.
+
+With a zone or camera it also carries `coverage` (see below): a count of zero
+over a period with a coverage gap is not a quiet period.
+
+### `home_list_cameras(camera=None)`
+
+Every camera, what it watches, and whether it is currently working: `status`
+(`healthy` / `degraded` / `offline` / `unknown`), `reason`, `checked_at`,
+`last_healthy_at`, `offline_since`, the raw entity states, and `last_event_at`.
+
+`last_event_at` is **not** a health signal — a camera with no events for days
+may be perfectly healthy in a quiet week — and `unknown` genuinely means not
+determinable, never "probably fine".
+
+### `home_coverage(start_time, end_time, camera=None, zone=None)`
+
+Whether a camera or zone was actually being watched during a past period.
+Exactly one of `camera` / `zone`.
+
+## Coverage: how a negative answer stays honest
+
+Any bounded, place-filtered query carries a `coverage` block, so a caller can
+never read `events: []` as "nothing happened" without also seeing whether
+anything was watching:
+
+```json
+"coverage": {
+  "period": {"start": "...", "end": "..."},
+  "complete": false,
+  "cameras_considered": ["backyard"],
+  "coverage_gaps": [
+    {"start": "2026-09-09T03:17:00Z", "end": "2026-09-09T05:42:00Z",
+     "status": "offline", "reason": "camera_entity_unavailable",
+     "camera": "backyard"}
+  ],
+  "unknown_periods": [],
+  "field_of_view": {"zone": "backyard", "status": "partial",
+                    "cameras": ["backyard", "cottage"]}
+}
+```
+
+`complete` is three-valued and the difference is the whole point:
+
+| | |
+|---|---|
+| `true` | confirmed watched throughout |
+| `false` | a known gap; see `coverage_gaps` |
+| `null` | **cannot be determined** — not "fine". Health was not being recorded then. |
+
+For a zone, `complete: true` means *at least one camera covering that zone was
+working throughout every time slice* — not that all of them were, and not that
+the whole zone was visible. `field_of_view` is the separate static fact and may
+still be `partial` or `none`.
+
+Full semantics in [camera-health.md](camera-health.md).
 
 ## Example result
 

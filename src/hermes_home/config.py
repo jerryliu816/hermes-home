@@ -70,6 +70,35 @@ class Settings(BaseSettings):
     #: How often the maintenance loop looks for incidents to close.
     incident_sweep_interval_seconds: int = Field(default=60, ge=1)
 
+    # Camera health monitoring. Answers "was this camera actually working then?",
+    # which is a different question from "does a camera point there" and must
+    # never be confused with it.
+    camera_health_enabled: bool = True
+    camera_health_interval_seconds: int = Field(default=60, ge=5, le=3600)
+    #: Consecutive adverse polls before the *current* status changes. History is
+    #: never debounced -- see health/monitor.py for why those differ.
+    camera_health_failure_threshold: int = Field(default=2, ge=1, le=10)
+
+    @property
+    def camera_health_gap_tolerance_seconds(self) -> float:
+        """How long a silence proves we stopped watching rather than merely idled.
+
+        A poll may only extend an interval's ``observed_through`` within this
+        window. Beyond it the interval is split and the silence becomes an
+        explicit monitoring gap, because a camera being healthy before and after
+        an outage says nothing whatsoever about the middle.
+        """
+        return self.camera_health_interval_seconds * 2
+
+    @property
+    def camera_health_stale_after_seconds(self) -> float:
+        """When a persisted current-health row stops being believable.
+
+        Evaluated at read time, so a monitor that has died cannot keep asserting
+        health simply by no longer writing.
+        """
+        return max(self.camera_health_interval_seconds * 3, 180)
+
     # Freshness gate. Measured on real Eufy hardware: the event still lands on
     # the image entity ~3.7s after the detection trigger fires, so the budget
     # (attempts x interval) must comfortably exceed that. 15s by default.
@@ -181,6 +210,12 @@ class HomeConfig(BaseModel):
 class CameraConfig(BaseModel):
     """How to obtain one camera's event still, and where it looks.
 
+    The key this config is filed under is a **permanent identifier**. Once health
+    history exists, it is the join key in ``camera_health`` and
+    ``camera_health_intervals``, so renaming it orphans that camera's entire
+    recorded history while presenting the new key as never-monitored. ``name``
+    and ``aliases`` exist so the words people use can change without touching it.
+
     ``event_image_strategy`` is the seam that keeps vendor differences out of the
     pipeline. Eufy exposes an ``image.*`` entity whose state advances on each new
     event, which gives us a freshness signal; other cameras may not. Swapping
@@ -197,6 +232,23 @@ class CameraConfig(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     camera_entity: str | None = None
     event_image_entity: str | None = None
+    #: Entity the health monitor watches, when the camera entity is a poor proxy
+    #: for whether the device is actually reachable. Defaults to camera_entity.
+    health_entity: str | None = None
+    #: States of ``health_entity`` that mean healthy, e.g. ``["on"]`` for a
+    #: connectivity binary_sensor.
+    #:
+    #: Availability and state are independent signals. A connectivity sensor
+    #: reports disconnection through its *state* while remaining perfectly
+    #: available, so availability-only rules would call a disconnected camera
+    #: healthy -- the precise false all-clear this whole feature exists to
+    #: prevent. Leave empty for availability-only semantics (the default, and
+    #: what every camera used before this existed).
+    #:
+    #: Comparison is exact after strip() and casefold(). There is deliberately
+    #: no truthiness table: the config says which states mean healthy for this
+    #: entity, and the monitor does not guess.
+    health_healthy_states: list[str] = Field(default_factory=list)
     event_image_strategy: Literal["image_entity_state", "camera_snapshot", "none"] = (
         "image_entity_state"
     )
@@ -224,6 +276,17 @@ class CameraConfig(BaseModel):
             raise ValueError(
                 f"camera {self.name!r} uses strategy 'camera_snapshot' but has no camera_entity"
             )
+        if self.health_healthy_states and not self.health_entity:
+            # Otherwise the predicate would silently change how camera_entity is
+            # judged, which is not what anyone writing this line intends.
+            raise ValueError(
+                f"camera {self.name!r} sets health_healthy_states without health_entity; "
+                "name the entity whose states those are"
+            )
+
+    def health_check_entity(self) -> str | None:
+        """The entity whose availability (and possibly state) means 'reachable'."""
+        return self.health_entity or self.camera_entity
 
 
 class CamerasConfig(BaseModel):

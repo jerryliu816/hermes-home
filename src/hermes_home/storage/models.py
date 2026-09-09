@@ -338,3 +338,110 @@ class EventDelivery(Base):
         Index("ix_event_deliveries_status_next_attempt_at", "status", "next_attempt_at"),
         Index("ix_event_deliveries_disposition", "disposition"),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Camera health: metadata about the instrument, not observations of the world
+# --------------------------------------------------------------------------- #
+
+
+class HealthStatus:
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    OFFLINE = "offline"
+    UNKNOWN = "unknown"
+
+
+class HealthReason:
+    """Structured reason codes. Hermes reads these; they are a contract."""
+
+    HA_UNREACHABLE = "home_assistant_unreachable"
+    CAMERA_ENTITY_UNAVAILABLE = "camera_entity_unavailable"
+    CAMERA_ENTITY_NOT_FOUND = "camera_entity_not_found"
+    EVENT_IMAGE_ENTITY_UNAVAILABLE = "event_image_entity_unavailable"
+    HEALTH_ENTITY_UNHEALTHY_STATE = "health_entity_unhealthy_state"
+    HEALTH_ENTITY_STATE_UNKNOWN = "health_entity_state_unknown"
+    NO_HEALTH_ENTITY = "no_health_entity_configured"
+    # Read-time only; never persisted.
+    MONITORING_GAP = "monitoring_gap"
+    BEFORE_TRACKING = "before_health_tracking"
+    TRACKING_NOT_STARTED = "health_tracking_not_started"
+    DATA_STALE = "health_data_stale"
+    MONITORING_DISABLED = "health_monitoring_disabled"
+    NOT_APPLICABLE_NO_CAMERAS = "not_applicable_no_cameras"
+
+
+class CameraHealth(Base):
+    """Current health of one camera. One row per camera, updated in place.
+
+    Keyed by the ``cameras.yaml`` key rather than an entity id: entity ids move
+    (``camera.driveway`` is mounted on the garage), and the key is what every
+    other part of the system already calls a camera.
+
+    ``last_event_at`` is deliberately absent. When an event last happened is
+    something ``events`` already knows, and a copy here would be written by the
+    monitor on a path it does not own -- going stale the moment health and
+    ingestion diverge. A stale timestamp presented as current is exactly the
+    class of bug this table exists to eliminate, so it is derived at read time.
+    """
+
+    __tablename__ = "camera_health"
+
+    camera_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    #: Debounced, user-facing. Lags a real change by up to the failure threshold
+    #: so one dropped request does not announce an outage.
+    status: Mapped[str] = mapped_column(String(16))
+    #: Adverse candidate not yet past the threshold.
+    pending_status: Mapped[str | None] = mapped_column(String(16))
+    #: The most recent poll's raw verdict, undebounced. This is what history
+    #: records, and it can legitimately disagree with ``status``.
+    observed_status: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str | None] = mapped_column(String(64))
+
+    camera_state: Mapped[str | None] = mapped_column(String(64))
+    image_state: Mapped[str | None] = mapped_column(String(64))
+
+    checked_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    last_healthy_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    offline_since: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    last_image_update_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    #: This camera's observation boundary. Coverage before it is unknown, always
+    #: -- absence of an outage row before we were watching is not health.
+    first_observed_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class CameraHealthInterval(Base):
+    """A span during which one camera held one status.
+
+    Intervals rather than transitions: the question we must answer is "was this
+    camera working between A and B", which over intervals is an overlap scan and
+    over transitions is a pairing exercise the reader can get wrong.
+
+    ``observed_through`` is the load-bearing column. Without it an open
+    ``healthy`` row would imply healthy straight through a four-hour service
+    outage -- a fabricated all-clear, the precise failure this feature exists to
+    prevent. Everything after ``observed_through`` and before the next interval
+    is unknown: we were not watching.
+
+    Rows are written only on a status change, and additionally whenever a gap in
+    observation is detected, so a steady state costs one UPDATE per poll and no
+    inserts. History is never debounced -- a single observed failure gets a row.
+    """
+
+    __tablename__ = "camera_health_intervals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    camera_key: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str | None] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    #: Last poll that actually confirmed this status.
+    observed_through: Mapped[datetime] = mapped_column(UtcDateTime)
+
+    __table_args__ = (
+        Index("ix_camera_health_intervals_camera_started", "camera_key", "started_at"),
+    )

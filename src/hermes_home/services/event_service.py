@@ -18,22 +18,40 @@ from hermes_home.core.time import ensure_utc, now_utc, to_display_tz
 from hermes_home.domain.dto import (
     ActivitySummary,
     AnalysisView,
+    CameraHealthView,
     CameraView,
+    CoverageSpan,
+    CoverageView,
     EventView,
     HomeView,
     ZoneView,
+)
+from hermes_home.health.coverage import (
+    Coverage,
+    get_camera_coverage,
+    get_zone_coverage,
 )
 from hermes_home.spatial import (
     adjacent_zone_keys,
     all_zones,
     cameras_observing,
+    coverage_of,
     zone_by_key,
     zone_relations,
     zones_covered_by,
     zones_partially_covered_by,
 )
-from hermes_home.storage.models import Event, EventAnalysis, EventTag, Incident, Zone
-from hermes_home.storage.repositories import EventRepository
+from hermes_home.storage.models import (
+    CameraHealth,
+    Event,
+    EventAnalysis,
+    EventTag,
+    HealthReason,
+    HealthStatus,
+    Incident,
+    Zone,
+)
+from hermes_home.storage.repositories import CameraHealthRepository, EventRepository
 
 #: A hard ceiling on any single response. Tool results are fed into a model's
 #: context, so an unbounded query is a way to blow that up by accident.
@@ -48,6 +66,7 @@ class EventService:
         self._settings = settings
         self._cameras = cameras
         self._repo = EventRepository(session)
+        self._health = CameraHealthRepository(session)
 
     # ----------------------------------------------------------------- #
 
@@ -138,6 +157,7 @@ class EventService:
     async def describe_home(self) -> HomeView:
         zones = await self.list_zones()
         covered = zones_covered_by(self._cameras)
+        health = {h.camera_key: h for h in await self._health.all_current()}
         return HomeView(
             name=self._settings.home_name,
             timezone=self._settings.display_timezone,
@@ -150,6 +170,11 @@ class EventService:
                     located_in=camera.location,
                     observes=sorted(camera.observes),
                     partial_coverage=sorted(camera.partial_coverage),
+                    # Where a camera points and whether it works are different
+                    # facts, so they sit in different fields and are never
+                    # collapsed into one.
+                    current_health=self._effective_status(health.get(key))[0],
+                    health_checked_at=(health[key].checked_at if key in health else None),
                 )
                 for key, camera in sorted(self._cameras.cameras.items())
             ],
@@ -189,6 +214,134 @@ class EventService:
             incident_count=incident_count or 0,
             timeline=list(reversed(events)),  # chronological reads better as a story
             note=note,
+        )
+
+    # ----------------------------------------------------------------- #
+    # Camera health and historical coverage
+
+    def _effective_status(self, row: CameraHealth | None) -> tuple[str | None, str | None]:
+        """Current status as it should be *reported*, with staleness applied.
+
+        A persisted "healthy" row asserts health for as long as it exists. If
+        the monitor died an hour ago, that assertion is a fabricated all-clear
+        of exactly the kind this feature exists to eliminate -- one layer up
+        from a fabricated coverage interval. So freshness is judged here, at
+        read time, which a dead monitor cannot influence by not writing.
+
+        Returns (status, reason); (None, ...) when the camera was never seen.
+        """
+        if not self._settings.camera_health_enabled:
+            return HealthStatus.UNKNOWN, HealthReason.MONITORING_DISABLED
+        if row is None:
+            return None, HealthReason.TRACKING_NOT_STARTED
+        age = (now_utc() - ensure_utc(row.checked_at)).total_seconds()
+        if age > self._settings.camera_health_stale_after_seconds:
+            return HealthStatus.UNKNOWN, HealthReason.DATA_STALE
+        return row.status, row.reason
+
+    async def camera_health(self, camera: str | None = None) -> list[CameraHealthView]:
+        """Current health for every configured camera, or one of them."""
+        rows = {h.camera_key: h for h in await self._health.all_current()}
+        keys = (
+            [camera]
+            if camera is not None and camera in self._cameras.cameras
+            else sorted(self._cameras.cameras)
+            if camera is None
+            else []
+        )
+
+        views: list[CameraHealthView] = []
+        for key in keys:
+            config = self._cameras.cameras[key]
+            row = rows.get(key)
+            status, reason = self._effective_status(row)
+            views.append(
+                CameraHealthView(
+                    key=key,
+                    name=config.name,
+                    aliases=list(config.aliases),
+                    located_in=config.location,
+                    observes=sorted(config.observes),
+                    partial_coverage=sorted(config.partial_coverage),
+                    status=status or HealthStatus.UNKNOWN,
+                    reason=reason,
+                    persisted_status=row.status if row else None,
+                    checked_at=row.checked_at if row else None,
+                    last_healthy_at=row.last_healthy_at if row else None,
+                    offline_since=row.offline_since if row else None,
+                    camera_state=row.camera_state if row else None,
+                    image_state=row.image_state if row else None,
+                    last_image_update_at=row.last_image_update_at if row else None,
+                    # Derived from events rather than stored: the events table
+                    # is the authority for when an event happened, and a copy
+                    # here would go stale the moment health and ingestion
+                    # diverge.
+                    last_event_at=await self.latest_event_time(camera=key),
+                    monitored=self._settings.camera_health_enabled,
+                )
+            )
+        return views
+
+    async def coverage_for(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        camera: str | None = None,
+        zone: str | None = None,
+    ) -> CoverageView | None:
+        """Operational coverage over a period, for one camera or one zone.
+
+        Returns None when neither is named -- coverage of "everywhere" is not a
+        question with a determinate answer, and inventing one would be worse
+        than declining.
+        """
+        if camera is not None:
+            if camera not in self._cameras.cameras:
+                return None
+            result = await get_camera_coverage(
+                self._health,
+                camera,
+                start=ensure_utc(start),
+                end=ensure_utc(end),
+                grace_seconds=self._settings.camera_health_gap_tolerance_seconds,
+            )
+            return self._to_coverage_view(result, field_of_view=None)
+
+        if zone is not None:
+            result = await get_zone_coverage(
+                self._health,
+                self._cameras,
+                zone,
+                start=ensure_utc(start),
+                end=ensure_utc(end),
+                grace_seconds=self._settings.camera_health_gap_tolerance_seconds,
+            )
+            return self._to_coverage_view(result, field_of_view=self._field_of_view(zone))
+
+        return None
+
+    def _field_of_view(self, zone: str) -> dict[str, object]:
+        """Static coverage of a zone: which cameras point at it, and how fully."""
+        return {
+            "zone": zone,
+            "status": coverage_of(self._cameras, zone),
+            "cameras": cameras_observing(self._cameras, zone),
+        }
+
+    @staticmethod
+    def _to_coverage_view(
+        result: Coverage, *, field_of_view: dict[str, object] | None
+    ) -> CoverageView:
+        return CoverageView(
+            start=result.start,
+            end=result.end,
+            complete=result.complete,
+            reason=result.reason,
+            cameras_considered=result.cameras_considered,
+            coverage_gaps=[CoverageSpan(**g.as_dict_typed()) for g in result.gaps],
+            unknown_periods=[CoverageSpan(**u.as_dict_typed()) for u in result.unknown_periods],
+            field_of_view=field_of_view,
         )
 
     # ----------------------------------------------------------------- #

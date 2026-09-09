@@ -16,6 +16,7 @@ from hermes_home.api.app import build_state, create_app
 from hermes_home.api.deps import AppState
 from hermes_home.core.ids import delivery_key
 from hermes_home.core.time import now_utc
+from hermes_home.health.monitor import CameraHealthMonitor
 from hermes_home.ingest.worker import IngestWorker
 from hermes_home.storage.engine import head_revision, session_scope
 from hermes_home.storage.repositories import DeliveryRepository
@@ -77,11 +78,19 @@ async def test_ready_is_true_when_everything_is_wired(
         ha_client=fake_ha,
         vision=MockVisionProvider(),
     )
+    state.health_monitor = CameraHealthMonitor(
+        session_factory=session_factory,
+        settings=settings,
+        cameras=cameras_config,
+        ha_client=fake_ha,
+    )
     await state.worker.start()
+    await state.health_monitor.start()
     try:
         response = await http.get("/ready")
         body = response.json()
     finally:
+        await state.health_monitor.stop()
         await state.worker.stop(grace_seconds=1)
 
     assert response.status_code == 200, body
@@ -90,6 +99,7 @@ async def test_ready_is_true_when_everything_is_wired(
     assert body["checks"]["migrations"]["ok"]
     assert body["checks"]["worker"]["ok"]
     assert body["checks"]["mcp"]["ok"]
+    assert body["checks"]["camera_health"]["ok"]
 
 
 async def test_ready_is_503_without_a_worker(client) -> None:

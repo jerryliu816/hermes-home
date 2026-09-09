@@ -93,6 +93,104 @@ class CameraView(BaseModel):
         default_factory=list,
         description="Zones this camera sees only part of.",
     )
+    current_health: str | None = Field(
+        default=None,
+        description=(
+            "Effective health right now: healthy | degraded | offline | unknown. "
+            "Distinct from the fields above, which describe where the camera points "
+            "regardless of whether it is working."
+        ),
+    )
+    health_checked_at: datetime | None = Field(
+        default=None, description="When health was last confirmed. Null if never monitored."
+    )
+
+
+class CameraHealthView(BaseModel):
+    """One camera's current health, as reported outward.
+
+    ``status`` is the *effective* status, computed at read time. A persisted
+    "healthy" row is only as good as its ``checked_at``: if the monitor stopped,
+    crashed or was disabled, that row would otherwise keep asserting health
+    forever. So staleness is evaluated when the question is asked, not when the
+    answer was written -- a dead monitor cannot mask itself by failing to write.
+    ``persisted_status`` keeps the raw value visible so the difference is
+    inspectable rather than merely asserted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    located_in: str
+    observes: list[str] = Field(default_factory=list)
+    partial_coverage: list[str] = Field(default_factory=list)
+
+    status: str = Field(description="healthy | degraded | offline | unknown (effective).")
+    reason: str | None = Field(default=None, description="Structured reason code, or null.")
+    persisted_status: str | None = Field(
+        default=None,
+        description="What the monitor last wrote, before staleness was applied.",
+    )
+    checked_at: datetime | None = Field(default=None, description="Last completed health poll.")
+    last_healthy_at: datetime | None = None
+    offline_since: datetime | None = None
+    camera_state: str | None = Field(default=None, description="Raw Home Assistant entity state.")
+    image_state: str | None = None
+    last_image_update_at: datetime | None = None
+    last_event_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When this camera last produced a stored event. NOT a health signal: a "
+            "camera with no events for days may be perfectly healthy in a quiet week."
+        ),
+    )
+    monitored: bool = Field(
+        default=True, description="False when health monitoring is disabled for the service."
+    )
+
+
+class CoverageSpan(BaseModel):
+    """One stretch of time that was not covered, or not verifiable."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start: datetime
+    end: datetime
+    status: str
+    reason: str | None = None
+    camera: str | None = None
+
+
+class CoverageView(BaseModel):
+    """Whether cameras were actually working over a period.
+
+    Entirely distinct from field of view. This says whether the equipment was
+    operating; ``field_of_view`` says where it points. A zone can be fully
+    covered operationally and still only partly visible, and merging the two
+    into one number is how a partly-watched zone becomes an all-clear.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start: datetime
+    end: datetime
+    complete: bool | None = Field(
+        description=(
+            "true = confirmed covered; false = a known gap exists; null = cannot be "
+            "determined. Null is NOT 'fine' -- it means nobody was recording health "
+            "then, so no claim either way is available."
+        )
+    )
+    reason: str | None = None
+    cameras_considered: list[str] = Field(default_factory=list)
+    coverage_gaps: list[CoverageSpan] = Field(default_factory=list)
+    unknown_periods: list[CoverageSpan] = Field(default_factory=list)
+    field_of_view: dict[str, Any] | None = Field(
+        default=None,
+        description="Static coverage of the zone: which cameras point at it, and how fully.",
+    )
 
 
 class HomeView(BaseModel):
