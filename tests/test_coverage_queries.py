@@ -557,3 +557,51 @@ async def test_the_grace_does_not_cover_a_monitor_that_actually_stopped(
         )
     assert result.complete is None
     assert result.unknown_periods[0].reason == HealthReason.MONITORING_GAP
+
+
+# --------------------------------------------------------------------------- #
+# What a monitoring gap actually claims
+# --------------------------------------------------------------------------- #
+
+
+def test_a_monitoring_gap_does_not_read_as_a_camera_fault() -> None:
+    """The wording is the feature.
+
+    "Coverage was unavailable" blames equipment that was working. On 2026-09-09
+    the cameras were fine and recording throughout; what lapsed was our
+    observation of them. These must render as different claims.
+    """
+    from hermes_home.health.coverage import meaning_of
+
+    gap = meaning_of(HealthReason.MONITORING_GAP)
+    assert "health was not observed" in gap
+    assert "may have continued operating normally" in gap
+    for word in ("offline", "unavailable", "coverage was unavailable", "failed"):
+        assert word not in gap.lower()
+
+    outage = meaning_of(HealthReason.CAMERA_ENTITY_UNAVAILABLE)
+    assert "unavailable" in outage
+    assert outage != gap
+
+
+def test_each_unknown_reason_says_something_different() -> None:
+    """Four distinct causes that must never be presented as equivalent."""
+    from hermes_home.health.coverage import meaning_of
+
+    reasons = [
+        HealthReason.MONITORING_GAP,
+        HealthReason.HA_UNREACHABLE,
+        HealthReason.CAMERA_ENTITY_UNAVAILABLE,
+        HealthReason.EVENT_IMAGE_ENTITY_UNAVAILABLE,
+    ]
+    meanings = [meaning_of(r) for r in reasons]
+    assert all(meanings)
+    assert len(set(meanings)) == len(reasons)
+
+
+async def test_gap_segments_carry_their_meaning(session_factory) -> None:
+    await record(session_factory, "front_door", [(2, 3, HealthStatus.HEALTHY)])
+    result = await camera_coverage(session_factory, "front_door", 2, 6)
+    span = result.unknown_periods[0].as_dict()
+    assert span["reason"] == HealthReason.MONITORING_GAP
+    assert "may have continued operating normally" in span["meaning"]

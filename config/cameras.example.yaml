@@ -36,6 +36,7 @@ cameras:
     camera_entity: camera.front_door
     event_image_entity: image.front_door_event_image
     event_image_strategy: image_entity_state
+    trigger_entity: binary_sensor.front_door_person_detected
     location: front_entry
     observes:
       - front_porch
@@ -46,6 +47,7 @@ cameras:
     camera_entity: camera.garage_right
     event_image_entity: image.garage_right_event_image
     event_image_strategy: image_entity_state
+    trigger_entity: binary_sensor.garage_right_motion_detected
     location: garage_entry
     # Mounted on the garage's front-facing wall, looking outward at the
     # driveway. It does NOT see inside the garage -- listing `garage` here
@@ -64,6 +66,7 @@ cameras:
     camera_entity: camera.driveway
     event_image_entity: image.driveway_event_image
     event_image_strategy: image_entity_state
+    trigger_entity: binary_sensor.driveway_motion_detected
     location: garage_entry
     observes:
       - driveway
@@ -77,6 +80,7 @@ cameras:
     camera_entity: camera.left_side_door
     event_image_entity: image.left_side_door_event_image
     event_image_strategy: image_entity_state
+    trigger_entity: binary_sensor.left_side_door_motion_detected
     location: left_walkway
     observes:
       - garage_side_door
@@ -86,6 +90,7 @@ cameras:
     camera_entity: camera.right_walkway
     event_image_entity: image.right_walkway_event_image
     event_image_strategy: image_entity_state
+    trigger_entity: binary_sensor.right_walkway_motion_detected
     location: right_walkway
     observes: []
 
@@ -98,6 +103,7 @@ cameras:
     camera_entity: camera.backyard
     event_image_entity: image.backyard_event_image
     event_image_strategy: image_entity_state
+    trigger_entity: binary_sensor.backyard_motion_detected
     location: backyard
     observes:
       - backyard
@@ -117,6 +123,7 @@ cameras:
     camera_entity: camera.cottage
     event_image_entity: image.cottage_event_image
     event_image_strategy: image_entity_state
+    trigger_entity: binary_sensor.cottage_motion_detected
     location: cottage
     observes:
       - backyard

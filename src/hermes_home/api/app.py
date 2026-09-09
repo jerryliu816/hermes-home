@@ -24,6 +24,7 @@ from hermes_home.config import (
     validate_home_and_cameras,
 )
 from hermes_home.health.monitor import CameraHealthMonitor
+from hermes_home.health.reconcile import DeliveryReconciler
 from hermes_home.ingest.worker import IngestWorker
 from hermes_home.observability.logging import configure_logging
 from hermes_home.spatial import seed_home
@@ -92,6 +93,16 @@ async def build_state(settings: Settings, *, start_worker: bool = True) -> AppSt
             cameras=cameras,
             ha_client=state.ha_client,
         )
+        # A third independent task. Camera health and delivery reconciliation
+        # answer different questions and fail independently -- on 2026-09-09
+        # every camera was healthy while four deliveries were lost -- so
+        # neither is allowed to depend on the other.
+        state.reconciler = DeliveryReconciler(
+            session_factory=session_factory,
+            settings=settings,
+            cameras=cameras,
+            ha_client=state.ha_client,
+        )
     return state
 
 
@@ -107,6 +118,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await state.worker.start()
         if state.health_monitor is not None:
             await state.health_monitor.start()
+        if state.reconciler is not None:
+            await state.reconciler.start()
 
         state.mcp_mounted = bool(getattr(app.state, "mcp_mounted", False))
         mcp = getattr(app.state, "mcp_server", None)
@@ -126,6 +139,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 async with mcp.session_manager.run():
                     yield
         finally:
+            if state.reconciler is not None:
+                await state.reconciler.stop()
             if state.health_monitor is not None:
                 await state.health_monitor.stop()
             if state.worker is not None:

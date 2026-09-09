@@ -10,6 +10,7 @@ Three endpoints matter for v1:
 ``GET /api/states/{entity_id}``      entity state and attributes
 ``GET /api/camera_proxy/{entity}``   a live snapshot from a camera entity
 ``GET /api/image_proxy/{entity}``    the current bytes of an ``image.*`` entity
+``GET /api/history/period/{start}``  recorded state changes for an entity
 
 The last one is the important one. An ``image.*`` entity's *state* is an ISO 8601
 timestamp of when its image last changed, which is what lets us tell a fresh
@@ -25,12 +26,13 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 import structlog
 
 from hermes_home.core.errors import HomeAssistantError
-from hermes_home.core.time import parse_ha_timestamp
+from hermes_home.core.time import ensure_utc, parse_ha_timestamp
 
 logger = structlog.get_logger(__name__)
 
@@ -197,6 +199,51 @@ class HomeAssistantClient:
         """
         response = await self._get(f"/api/image_proxy/{image_entity_id}")
         return response.content, response.headers.get("content-type", "image/jpeg")
+
+    async def get_state_history(
+        self, entity_id: str, *, start: datetime, end: datetime | None = None
+    ) -> list[tuple[datetime, str]]:
+        """Recorded ``(changed_at, state)`` pairs for one entity, oldest first.
+
+        Home Assistant's recorder is what lets us tell *one* missed event from
+        several: it keeps a timestamp per transition, so four lost deliveries
+        are reported as four rather than as "something went wrong". Without it
+        the best we could say is that the last known state differs from ours.
+
+        ``minimal_response`` keeps the payload to states and timestamps -- no
+        attributes, and never an image. A history call costs the camera nothing.
+
+        Bounded by the recorder's own retention: nothing before it is knowable,
+        which is why a period with no history reads as unknown, not as clean.
+        """
+        params = {
+            "filter_entity_id": entity_id,
+            "minimal_response": "",
+            "significant_changes_only": "0",
+        }
+        if end is not None:
+            params["end_time"] = ensure_utc(end).isoformat()
+        query = urlencode(params)
+        path = f"/api/history/period/{ensure_utc(start).isoformat()}?{query}"
+
+        response = await self._get(path)
+        payload = response.json()
+        if not payload:
+            return []
+
+        history: list[tuple[datetime, str]] = []
+        for series in payload:
+            for entry in series:
+                raw = entry.get("last_changed") or entry.get("last_updated")
+                state = entry.get("state")
+                if not raw or state is None:
+                    continue
+                try:
+                    history.append((parse_ha_timestamp(raw), str(state)))
+                except (ValueError, TypeError):
+                    continue
+        history.sort(key=lambda item: item[0])
+        return history
 
     async def ping(self) -> bool:
         """True when the API answers and our token is accepted."""

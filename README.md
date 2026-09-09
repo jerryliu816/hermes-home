@@ -89,6 +89,12 @@ and one you cannot.
 so "no events in the backyard" is reported as *no coverage there*, never as an
 all-clear.
 
+**It knows when events went missing.** Camera health cannot tell you that Home
+Assistant fired an event which never arrived — that failure looks identical to
+silence. So deliveries are reconciled against Home Assistant's own recorder, and
+a query over an affected period reports the events as *missing*, with the exact
+timestamps, rather than as *nothing happened*.
+
 **It knows when it was not looking.** Camera health is polled and kept as
 history, so a quiet night and a camera that was offline from 3:17 to 5:42 are
 different answers. Periods before monitoring began, or while the service was
@@ -253,7 +259,7 @@ once volume grows.
 ## Development
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 276 tests, no network, no credentials
+.venv/bin/python -m pytest tests/ -q      # 308 tests, no network, no credentials
 .venv/bin/ruff check src/ tests/
 .venv/bin/ruff format src/ tests/
 ```
@@ -270,6 +276,7 @@ broken migration fails the tests instead of surfacing at deploy time.
 | [threat-model.md](docs/threat-model.md) | assets, controls, and stated limitations |
 | [spatial-model.md](docs/spatial-model.md) | zones, coverage, adding a camera |
 | [camera-health.md](docs/camera-health.md) | camera health, historical coverage, why unknown is not false |
+| [event-pipeline.md](docs/event-pipeline.md) | detecting Home Assistant events that never arrived |
 | [mcp-tools.md](docs/mcp-tools.md) | the tool contract Hermes depends on |
 | [home-assistant-setup.md](docs/home-assistant-setup.md) | automation and entity wiring |
 | [camera-event-images.md](docs/camera-event-images.md) | measured Eufy timing and resolution |
@@ -321,5 +328,6 @@ LAN address for Home Assistant — never `0.0.0.0`, and never to the internet.
 - [x] Docker packaging and deployment
 - [x] Multi-camera rollout (configuration, not code)
 - [x] Camera health and historical coverage
+- [x] Delivery reconciliation against Home Assistant
 - [ ] Incident correlation across zones
 - [ ] Powerwall / energy events

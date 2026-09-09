@@ -19,17 +19,22 @@ from hermes_home.domain.dto import (
     ActivitySummary,
     AnalysisView,
     CameraHealthView,
+    CameraPipelineHealthView,
     CameraView,
     CoverageSpan,
     CoverageView,
     EventView,
     HomeView,
+    PipelineCoverageView,
+    PipelineGapView,
     ZoneView,
 )
 from hermes_home.health.coverage import (
     Coverage,
     get_camera_coverage,
+    get_pipeline_coverage,
     get_zone_coverage,
+    meaning_of,
 )
 from hermes_home.spatial import (
     adjacent_zone_keys,
@@ -49,9 +54,15 @@ from hermes_home.storage.models import (
     HealthReason,
     HealthStatus,
     Incident,
+    PipelineStatus,
+    VerificationMode,
     Zone,
 )
-from hermes_home.storage.repositories import CameraHealthRepository, EventRepository
+from hermes_home.storage.repositories import (
+    CameraHealthRepository,
+    DeliveryGapRepository,
+    EventRepository,
+)
 
 #: A hard ceiling on any single response. Tool results are fed into a model's
 #: context, so an unbounded query is a way to blow that up by accident.
@@ -67,6 +78,7 @@ class EventService:
         self._cameras = cameras
         self._repo = EventRepository(session)
         self._health = CameraHealthRepository(session)
+        self._gaps = DeliveryGapRepository(session)
 
     # ----------------------------------------------------------------- #
 
@@ -306,7 +318,8 @@ class EventService:
                 end=ensure_utc(end),
                 grace_seconds=self._settings.camera_health_gap_tolerance_seconds,
             )
-            return self._to_coverage_view(result, field_of_view=None)
+            view = self._to_coverage_view(result, field_of_view=None)
+            return await self._annotate_observed_events(view, camera=camera, zone=None)
 
         if zone is not None:
             result = await get_zone_coverage(
@@ -317,9 +330,99 @@ class EventService:
                 end=ensure_utc(end),
                 grace_seconds=self._settings.camera_health_gap_tolerance_seconds,
             )
-            return self._to_coverage_view(result, field_of_view=self._field_of_view(zone))
+            view = self._to_coverage_view(result, field_of_view=self._field_of_view(zone))
+            return await self._annotate_observed_events(view, camera=None, zone=zone)
 
         return None
+
+    async def pipeline_health(self, camera_key: str) -> CameraPipelineHealthView:
+        """Current delivery-path health for one camera.
+
+        A quiet camera is never degraded. If reconciliation is running and
+        finding nothing wrong, the mechanism is working even though nothing has
+        fired to exercise it end to end -- that is ``no_recent_trigger``, not a
+        fault. Requiring traffic to claim health would make every quiet night
+        look like an outage.
+        """
+        if not self._settings.delivery_reconciliation_enabled:
+            return CameraPipelineHealthView(
+                status=PipelineStatus.UNKNOWN,
+                verification_mode=VerificationMode.PASSIVE,
+                reason="delivery_reconciliation_disabled",
+            )
+
+        state = await self._gaps.get_state(camera_key)
+        if state is None:
+            return CameraPipelineHealthView(
+                status=PipelineStatus.UNKNOWN,
+                verification_mode=VerificationMode.PASSIVE,
+                reason=HealthReason.TRACKING_NOT_STARTED,
+            )
+
+        now = now_utc()
+        stale_after = self._settings.delivery_reconciliation_interval_seconds * 3
+        if (now - ensure_utc(state.last_checked_at)).total_seconds() > stale_after:
+            return CameraPipelineHealthView(
+                status=PipelineStatus.UNKNOWN,
+                verification_mode=VerificationMode.PASSIVE,
+                reason=HealthReason.DATA_STALE,
+                last_verified_delivery_at=state.last_verified_delivery_at,
+                last_reconciliation_check_at=state.last_checked_at,
+            )
+
+        lookback = timedelta(seconds=self._settings.delivery_reconciliation_lookback_seconds)
+        open_gaps = await self._gaps.gaps_between(
+            start=now - lookback, end=now, camera_key=camera_key
+        )
+        verified = state.last_verified_delivery_at
+        recently_verified = verified is not None and (now - ensure_utc(verified)) <= lookback
+
+        return CameraPipelineHealthView(
+            status=PipelineStatus.DEGRADED if open_gaps else PipelineStatus.HEALTHY,
+            verification_mode=(
+                VerificationMode.ACTIVE if recently_verified else VerificationMode.NO_RECENT_TRIGGER
+            ),
+            reason=open_gaps[0].reason if open_gaps else None,
+            last_verified_delivery_at=verified,
+            last_reconciliation_check_at=state.last_checked_at,
+            open_gap_count=len(open_gaps),
+        )
+
+    async def pipeline_coverage_for(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        camera: str | None = None,
+        zone: str | None = None,
+    ) -> PipelineCoverageView | None:
+        """Delivery coverage for one camera, or every camera watching one zone."""
+        if camera is not None:
+            keys = [camera] if camera in self._cameras.cameras else []
+        elif zone is not None:
+            keys = cameras_observing(self._cameras, zone)
+        else:
+            return None
+        if not keys:
+            return None
+
+        result = await get_pipeline_coverage(
+            self._gaps,
+            self._cameras,
+            start=ensure_utc(start),
+            end=ensure_utc(end),
+            camera_keys=keys,
+        )
+        return PipelineCoverageView(
+            start=result.start,
+            end=result.end,
+            complete=result.complete,
+            reason=result.reason,
+            meaning=meaning_of(result.reason),
+            cameras_considered=result.cameras_considered,
+            delivery_gaps=[PipelineGapView(**g.as_dict()) for g in result.gaps],
+            unknown_periods=[CoverageSpan(**u.as_dict_typed()) for u in result.unknown_periods],
+        )
 
     def _field_of_view(self, zone: str) -> dict[str, object]:
         """Static coverage of a zone: which cameras point at it, and how fully."""
@@ -328,6 +431,28 @@ class EventService:
             "status": coverage_of(self._cameras, zone),
             "cameras": cameras_observing(self._cameras, zone),
         }
+
+    async def _annotate_observed_events(
+        self, view: CoverageView, *, camera: str | None, zone: str | None
+    ) -> CoverageView:
+        """Count events actually recorded inside each unverified span.
+
+        An event inside a monitoring gap is positive proof that the camera and
+        the pipeline both worked at that instant -- so "no activity was
+        recorded" is simply false about that period, and Hermes needs to be able
+        to see that without inferring it.
+
+        It deliberately does not shorten, split or reclassify the span. One
+        event at 07:34 says nothing about 07:35, and letting evidence of a
+        single moment stand in for continuous coverage is exactly the
+        over-claim this whole feature exists to prevent.
+        """
+        for span in view.unknown_periods:
+            events = await self.search_events(
+                start=span.start, end=span.end, camera=camera, zone=zone, limit=MAX_LIMIT
+            )
+            span.events_observed = len(events)
+        return view
 
     @staticmethod
     def _to_coverage_view(

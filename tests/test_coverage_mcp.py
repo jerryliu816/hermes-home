@@ -122,8 +122,8 @@ async def test_events_with_complete_coverage(mcp_server, session_factory, stored
     out = await call(mcp_server, "home_search_events", {**window(), "camera": "front_door"})
 
     assert out["count"] == 1
-    assert out["coverage"]["complete"] is True
-    assert out["coverage"]["coverage_gaps"] == []
+    assert out["camera_health_coverage"]["complete"] is True
+    assert out["camera_health_coverage"]["coverage_gaps"] == []
 
 
 async def test_no_events_with_complete_coverage_is_a_genuine_all_clear(
@@ -133,7 +133,7 @@ async def test_no_events_with_complete_coverage_is_a_genuine_all_clear(
     out = await call(mcp_server, "home_search_events", {**window(), "camera": "front_door"})
 
     assert out["count"] == 0
-    assert out["coverage"]["complete"] is True
+    assert out["camera_health_coverage"]["complete"] is True
 
 
 async def test_no_events_with_incomplete_coverage_is_not_an_all_clear(
@@ -144,8 +144,8 @@ async def test_no_events_with_incomplete_coverage_is_not_an_all_clear(
     out = await call(mcp_server, "home_search_events", {**window(), "camera": "front_door"})
 
     assert out["count"] == 0
-    assert out["coverage"]["complete"] is False
-    gap = out["coverage"]["coverage_gaps"][0]
+    assert out["camera_health_coverage"]["complete"] is False
+    gap = out["camera_health_coverage"]["coverage_gaps"][0]
     assert gap["status"] == HealthStatus.OFFLINE
     assert gap["reason"] == HealthReason.CAMERA_ENTITY_UNAVAILABLE
 
@@ -157,7 +157,7 @@ async def test_events_with_incomplete_coverage_disclose_both(
     out = await call(mcp_server, "home_search_events", {**window(), "camera": "front_door"})
 
     assert out["count"] == 1
-    assert out["coverage"]["complete"] is False
+    assert out["camera_health_coverage"]["complete"] is False
 
 
 async def test_a_period_before_tracking_is_unknown_never_complete(
@@ -175,8 +175,11 @@ async def test_a_period_before_tracking_is_unknown_never_complete(
             "camera": "front_door",
         },
     )
-    assert out["coverage"]["complete"] is None
-    assert out["coverage"]["unknown_periods"][0]["reason"] == HealthReason.BEFORE_TRACKING
+    assert out["camera_health_coverage"]["complete"] is None
+    assert (
+        out["camera_health_coverage"]["unknown_periods"][0]["reason"]
+        == HealthReason.BEFORE_TRACKING
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -187,21 +190,21 @@ async def test_a_period_before_tracking_is_unknown_never_complete(
 async def test_recent_events_attaches_coverage_for_a_camera(mcp_server, session_factory) -> None:
     await set_health(session_factory, "front_door", HealthStatus.OFFLINE)
     out = await call(mcp_server, "home_recent_events", {"camera": "front_door", "minutes": 120})
-    assert out["coverage"]["complete"] is False
+    assert out["camera_health_coverage"]["complete"] is False
 
 
 async def test_recent_events_attaches_coverage_for_a_zone(mcp_server, session_factory) -> None:
     await set_health(session_factory, "backyard", HealthStatus.OFFLINE)
     await set_health(session_factory, "cottage", HealthStatus.OFFLINE)
     out = await call(mcp_server, "home_recent_events", {"zone": "backyard", "minutes": 120})
-    assert out["coverage"]["complete"] is False
-    assert set(out["coverage"]["cameras_considered"]) == {"backyard", "cottage"}
+    assert out["camera_health_coverage"]["complete"] is False
+    assert set(out["camera_health_coverage"]["cameras_considered"]) == {"backyard", "cottage"}
 
 
 async def test_an_unfiltered_query_gets_no_coverage_block(mcp_server) -> None:
     """Coverage of 'everywhere' is not a question with a determinate answer."""
     out = await call(mcp_server, "home_recent_events", {"minutes": 60})
-    assert "coverage" not in out
+    assert "camera_health_coverage" not in out
 
 
 async def test_summarize_activity_carries_coverage(mcp_server, session_factory) -> None:
@@ -209,9 +212,9 @@ async def test_summarize_activity_carries_coverage(mcp_server, session_factory) 
     out = await call(mcp_server, "home_summarize_activity", {**window(), "zone": "front_entry"})
 
     assert out["event_count"] == 0
-    assert out["coverage"]["complete"] is False
+    assert out["camera_health_coverage"]["complete"] is False
     # Field of view stays a separate fact.
-    assert out["zone_coverage"]["status"] == "full"
+    assert out["field_of_view"]["status"] == "full"
 
 
 async def test_field_of_view_and_operational_coverage_stay_separate(
@@ -226,9 +229,9 @@ async def test_field_of_view_and_operational_coverage_stay_separate(
     await set_health(session_factory, "cottage", HealthStatus.HEALTHY)
     out = await call(mcp_server, "home_search_events", {**window(), "zone": "backyard"})
 
-    assert out["coverage"]["complete"] is True
-    assert out["coverage"]["field_of_view"]["status"] == "partial"
-    assert out["zone_coverage"]["status"] == "partial"
+    assert out["camera_health_coverage"]["complete"] is True
+    assert out["camera_health_coverage"]["field_of_view"]["status"] == "partial"
+    assert out["field_of_view"]["status"] == "partial"
 
 
 # --------------------------------------------------------------------------- #
@@ -280,16 +283,18 @@ async def test_list_cameras_last_event_is_not_a_health_signal(
 async def test_home_coverage_for_a_camera(mcp_server, session_factory) -> None:
     await set_health(session_factory, "front_door", HealthStatus.OFFLINE)
     out = await call(mcp_server, "home_coverage", {**window(), "camera": "front_door"})
-    assert out["complete"] is False
-    assert out["cameras_considered"] == ["front_door"]
+    health = out["camera_health_coverage"]
+    assert health["complete"] is False
+    assert health["cameras_considered"] == ["front_door"]
 
 
 async def test_home_coverage_for_a_zone_includes_field_of_view(mcp_server, session_factory) -> None:
     await set_health(session_factory, "garage_left", HealthStatus.HEALTHY)
     await set_health(session_factory, "garage_right", HealthStatus.OFFLINE)
     out = await call(mcp_server, "home_coverage", {**window(), "zone": "driveway"})
-    assert out["complete"] is True
-    assert out["field_of_view"]["status"] == "full"
+    health = out["camera_health_coverage"]
+    assert health["complete"] is True
+    assert health["field_of_view"]["status"] == "full"
 
 
 async def test_home_coverage_requires_exactly_one_of_camera_or_zone(mcp_server) -> None:
@@ -318,3 +323,93 @@ async def test_describe_home_separates_field_of_view_from_health(
     # And its health is a separate field.
     assert backyard["current_health"] == HealthStatus.OFFLINE
     assert backyard["health_checked_at"] is not None
+
+
+# --------------------------------------------------------------------------- #
+# Events inside an unobserved period
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_event_inside_a_monitoring_gap_stays_visible(
+    mcp_server, session_factory, stored_event
+) -> None:
+    """The failure this prevents: "no activity was recorded" when there was.
+
+    An event inside an unobserved span is proof the camera and the pipeline
+    both worked at that instant, so the period cannot be reported as silent.
+    """
+    now = now_utc()
+    async with session_scope(session_factory) as session:
+        session.add(
+            CameraHealthInterval(
+                camera_key="front_door",
+                status=HealthStatus.HEALTHY,
+                reason=None,
+                started_at=now - timedelta(hours=6),
+                ended_at=None,
+                observed_through=now - timedelta(hours=5),
+            )
+        )
+
+    out = await call(mcp_server, "home_search_events", {**window(), "camera": "front_door"})
+
+    assert out["count"] == 1, "the event must still be returned"
+    coverage = out["camera_health_coverage"]
+    assert coverage["complete"] is None
+    gap = coverage["unknown_periods"][0]
+    assert gap["reason"] == HealthReason.MONITORING_GAP
+    assert gap["events_observed"] == 1
+
+
+async def test_an_event_does_not_shorten_or_heal_the_gap(
+    mcp_server, session_factory, stored_event
+) -> None:
+    """One event at 07:34 says nothing about 07:35.
+
+    Letting a single moment's evidence stand in for continuous coverage is the
+    same over-claim this whole feature exists to prevent, one level down.
+    """
+    now = now_utc()
+    async with session_scope(session_factory) as session:
+        session.add(
+            CameraHealthInterval(
+                camera_key="front_door",
+                status=HealthStatus.HEALTHY,
+                reason=None,
+                started_at=now - timedelta(hours=6),
+                ended_at=None,
+                observed_through=now - timedelta(hours=5),
+            )
+        )
+
+    out = await call(mcp_server, "home_search_events", {**window(), "camera": "front_door"})
+    coverage = out["camera_health_coverage"]
+    gap = coverage["unknown_periods"][0]
+
+    assert coverage["complete"] is None, "still unknown, not healthy"
+    assert gap["status"] == HealthStatus.UNKNOWN
+    # The span is unchanged: it still runs to the end of the query window.
+    assert gap["end"] == coverage["end"]
+    assert gap["events_observed"] == 1
+
+
+async def test_pipeline_coverage_appears_beside_health_coverage(
+    mcp_server, session_factory
+) -> None:
+    """Three independent dimensions, never merged into one number."""
+    await set_health(session_factory, "front_door", HealthStatus.HEALTHY)
+    out = await call(mcp_server, "home_search_events", {**window(), "zone": "front_entry"})
+
+    assert "field_of_view" in out
+    assert "camera_health_coverage" in out
+    assert "event_pipeline_coverage" in out
+    # Never reconciled yet, so delivery health is unknown -- not assumed fine.
+    assert out["event_pipeline_coverage"]["complete"] is None
+
+
+async def test_list_cameras_reports_pipeline_health_separately(mcp_server) -> None:
+    out = await call(mcp_server, "home_list_cameras", {"camera": "front_door"})
+    camera = out["cameras"][0]
+    assert "event_pipeline_health" in camera
+    assert camera["event_pipeline_health"]["status"] == "unknown"
+    assert camera["event_pipeline_health"]["verification_mode"] == "passive"

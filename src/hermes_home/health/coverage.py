@@ -25,8 +25,66 @@ from itertools import pairwise
 from hermes_home.config import CamerasConfig
 from hermes_home.core.time import ensure_utc
 from hermes_home.spatial import cameras_observing
-from hermes_home.storage.models import HealthReason, HealthStatus
-from hermes_home.storage.repositories import CameraHealthRepository
+from hermes_home.storage.models import DeliveryGapReason, HealthReason, HealthStatus
+from hermes_home.storage.repositories import CameraHealthRepository, DeliveryGapRepository
+
+#: What each reason actually means, in words Hermes can use directly. The
+#: structured code is always preserved alongside; this exists so that a gap in
+#: OUR OBSERVATION is never rendered as a camera fault. They are different
+#: claims about different equipment, and conflating them is how a working
+#: camera gets reported as a dead one.
+REASON_MEANINGS: dict[str, str] = {
+    HealthReason.MONITORING_GAP: (
+        "Camera health was not observed during this interval. The camera may have "
+        "continued operating normally."
+    ),
+    HealthReason.BEFORE_TRACKING: (
+        "Camera health was not observed during this interval because health tracking "
+        "had not started yet. The camera may have continued operating normally."
+    ),
+    HealthReason.TRACKING_NOT_STARTED: (
+        "Camera health has never been observed for this camera. Nothing is known "
+        "about whether it was working."
+    ),
+    HealthReason.HA_UNREACHABLE: (
+        "hermes-home could not reach Home Assistant, so camera health could not be "
+        "observed. This says nothing about the camera itself."
+    ),
+    HealthReason.CAMERA_ENTITY_UNAVAILABLE: (
+        "Home Assistant reported the camera entity as unavailable: a known device outage."
+    ),
+    HealthReason.CAMERA_ENTITY_NOT_FOUND: (
+        "The configured camera entity does not exist in Home Assistant."
+    ),
+    HealthReason.EVENT_IMAGE_ENTITY_UNAVAILABLE: (
+        "The camera was reachable but its event-image entity was unavailable, so an "
+        "event would not have produced an analyzable frame."
+    ),
+    HealthReason.HEALTH_ENTITY_UNHEALTHY_STATE: (
+        "The camera's configured connectivity entity reported a disconnected state."
+    ),
+    HealthReason.HEALTH_ENTITY_STATE_UNKNOWN: (
+        "The camera's connectivity entity reported an unknown state, so health could "
+        "not be determined."
+    ),
+    HealthReason.NO_HEALTH_ENTITY: (
+        "No entity is configured for this camera, so its health cannot be observed."
+    ),
+    HealthReason.NOT_APPLICABLE_NO_CAMERAS: (
+        "No camera is configured to watch this zone, so there is no camera health to "
+        "report. This is a configuration fact, not an outage."
+    ),
+    DeliveryGapReason.WEBHOOK_NOT_RECEIVED: (
+        "Home Assistant recorded a camera trigger but hermes-home never received the "
+        "corresponding delivery, so this event is missing from the stored history."
+    ),
+}
+
+
+def meaning_of(reason: str | None) -> str | None:
+    """Plain-language meaning for a structured reason code, if we have one."""
+    return REASON_MEANINGS.get(reason) if reason else None
+
 
 #: Statuses that mean the camera was not usefully watching. ``degraded`` counts:
 #: it is the state in which the event-image entity is unavailable, so a real
@@ -60,6 +118,7 @@ class Segment:
             "end": self.end,
             "status": self.status,
             "reason": self.reason,
+            "meaning": meaning_of(self.reason),
             "camera": self.camera,
         }
 
@@ -69,6 +128,7 @@ class Segment:
             "end": self.end.isoformat(),
             "status": self.status,
             "reason": self.reason,
+            "meaning": meaning_of(self.reason),
         }
         if self.camera is not None:
             out["camera"] = self.camera
@@ -335,4 +395,144 @@ async def get_zone_coverage(
         cameras_considered=considered,
         gaps=gaps,
         unknown_periods=unknowns,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Event-pipeline coverage: were Home Assistant's events actually reaching us?
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class PipelineGap:
+    """One Home Assistant trigger that produced no delivery here."""
+
+    camera: str
+    trigger_at: datetime
+    reason: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "camera": self.camera,
+            "ha_trigger_timestamp": self.trigger_at.isoformat(),
+            "reason": self.reason,
+            "meaning": meaning_of(self.reason),
+        }
+
+
+@dataclass
+class PipelineCoverage:
+    """Whether hermes-home was known to be receiving what Home Assistant sent.
+
+    Independent of camera health. A camera can be perfectly healthy while every
+    one of its events is lost in transit -- that is precisely what happened on
+    2026-09-09 -- so an answer that reports only camera health is describing the
+    wrong half of the system.
+    """
+
+    start: datetime
+    end: datetime
+    complete: bool | None
+    cameras_considered: list[str]
+    gaps: list[PipelineGap] = field(default_factory=list)
+    unknown_periods: list[Segment] = field(default_factory=list)
+    reason: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "period": {"start": self.start.isoformat(), "end": self.end.isoformat()},
+            "complete": self.complete,
+            "reason": self.reason,
+            "meaning": meaning_of(self.reason),
+            "cameras_considered": self.cameras_considered,
+            "delivery_gaps": [g.as_dict() for g in self.gaps],
+            "unknown_periods": [u.as_dict() for u in self.unknown_periods],
+        }
+
+
+async def get_pipeline_coverage(
+    repo: DeliveryGapRepository,
+    cameras: CamerasConfig,
+    *,
+    start: datetime,
+    end: datetime,
+    camera_keys: list[str],
+) -> PipelineCoverage:
+    """Tri-state delivery coverage for a set of cameras over a period.
+
+        true   reconciliation was running throughout, and every Home Assistant
+               trigger in the interval had a matching delivery
+        false  at least one trigger has no delivery -- events are missing
+        null   reconciliation was not running, so nothing can be claimed
+
+    A quiet interval with reconciliation running is ``true``, not unknown.
+    Nothing needed delivering, and the mechanism that would have noticed was
+    working; requiring traffic to prove health would make every quiet night
+    indistinguishable from an outage.
+    """
+    start, end = ensure_utc(start), ensure_utc(end)
+    reconcilable = [k for k in camera_keys if cameras.cameras.get(k, None) is not None]
+    reconcilable = [k for k in reconcilable if cameras.cameras[k].reconcilable()]
+
+    if not reconcilable:
+        return PipelineCoverage(
+            start=start,
+            end=end,
+            complete=None,
+            cameras_considered=[],
+            reason=HealthReason.TRACKING_NOT_STARTED,
+        )
+
+    gaps: list[PipelineGap] = []
+    unknown: list[Segment] = []
+
+    for key in reconcilable:
+        state = await repo.get_state(key)
+        if state is None:
+            unknown.append(
+                Segment(start, end, HealthStatus.UNKNOWN, HealthReason.TRACKING_NOT_STARTED, key)
+            )
+            continue
+
+        first = ensure_utc(state.first_checked_at)
+        through = ensure_utc(state.checked_through)
+        if first > start:
+            unknown.append(
+                Segment(
+                    start,
+                    min(first, end),
+                    HealthStatus.UNKNOWN,
+                    HealthReason.BEFORE_TRACKING,
+                    key,
+                )
+            )
+        if through < end:
+            unknown.append(
+                Segment(
+                    max(through, start),
+                    end,
+                    HealthStatus.UNKNOWN,
+                    HealthReason.MONITORING_GAP,
+                    key,
+                )
+            )
+
+        for row in await repo.gaps_between(start=start, end=end, camera_key=key):
+            gaps.append(
+                PipelineGap(
+                    camera=key,
+                    trigger_at=ensure_utc(row.ha_trigger_at),
+                    reason=row.reason,
+                )
+            )
+
+    unknown = _merge([u for u in unknown if u.end > u.start])
+    gaps.sort(key=lambda g: g.trigger_at)
+    return PipelineCoverage(
+        start=start,
+        end=end,
+        complete=False if gaps else (None if unknown else True),
+        cameras_considered=reconcilable,
+        gaps=gaps,
+        unknown_periods=unknown,
     )

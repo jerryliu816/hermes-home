@@ -18,8 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hermes_home.core.ids import new_uid
 from hermes_home.core.time import ensure_utc, now_utc
 from hermes_home.storage.models import (
+    CameraDeliveryGap,
     CameraHealth,
     CameraHealthInterval,
+    CameraPipelineState,
+    DeliveryGapReason,
     DeliveryStatus,
     Event,
     EventAnalysis,
@@ -459,3 +462,154 @@ class CameraHealthRepository:
                 CameraHealthInterval.camera_key == camera_key
             )
         )
+
+
+class DeliveryGapRepository:
+    """Triggers Home Assistant fired that never reached us, and how far we looked."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def deliveries_between(
+        self, *, camera_key: str, start: datetime, end: datetime
+    ) -> list[EventDelivery]:
+        """Deliveries received for one camera in a window.
+
+        Matches against *deliveries*, not persisted events, and deliberately:
+        a delivery that arrived and was rejected as a stale image did reach us.
+        That is an ingest outcome, not a transport loss, and counting it as a
+        delivery gap would blame the network for a camera timing problem.
+        """
+        rows = await self._session.scalars(
+            select(EventDelivery).where(
+                EventDelivery.received_at >= ensure_utc(start),
+                EventDelivery.received_at <= ensure_utc(end),
+            )
+        )
+        return [
+            d
+            for d in rows.all()
+            if isinstance(d.raw_body, dict) and d.raw_body.get("camera") == camera_key
+        ]
+
+    async def record_gap(
+        self,
+        *,
+        camera_key: str,
+        trigger_entity: str,
+        ha_trigger_at: datetime,
+        ha_image_ts: datetime | None,
+        detected_at: datetime,
+    ) -> CameraDeliveryGap | None:
+        """Record one missing delivery. Idempotent on (camera, trigger instant).
+
+        Re-examining a window is normal -- the lookback deliberately overlaps --
+        so the same trigger is seen many times. Keying on Home Assistant's own
+        transition timestamp means a repeat pass recognises it rather than
+        filing a duplicate.
+        """
+        moment = ensure_utc(ha_trigger_at)
+        existing = await self._session.scalar(
+            select(CameraDeliveryGap).where(
+                CameraDeliveryGap.camera_key == camera_key,
+                CameraDeliveryGap.ha_trigger_at == moment,
+            )
+        )
+        if existing is not None:
+            return None
+
+        gap = CameraDeliveryGap(
+            camera_key=camera_key,
+            trigger_entity=trigger_entity,
+            ha_trigger_at=moment,
+            ha_image_ts=ensure_utc(ha_image_ts) if ha_image_ts else None,
+            detected_at=ensure_utc(detected_at),
+            status="missing",
+            reason=DeliveryGapReason.WEBHOOK_NOT_RECEIVED,
+        )
+        self._session.add(gap)
+        await self._session.flush()
+        return gap
+
+    async def resolve_gap(
+        self, *, camera_key: str, ha_trigger_at: datetime, delivery_id: int | None
+    ) -> bool:
+        """Mark a previously-missing trigger as delivered after all.
+
+        A delivery can arrive late -- retried transport, a queue draining after
+        a network partition. The gap was still real when recorded, so the row
+        is kept and re-labelled rather than deleted.
+        """
+        gap = await self._session.scalar(
+            select(CameraDeliveryGap).where(
+                CameraDeliveryGap.camera_key == camera_key,
+                CameraDeliveryGap.ha_trigger_at == ensure_utc(ha_trigger_at),
+                CameraDeliveryGap.status == "missing",
+            )
+        )
+        if gap is None:
+            return False
+        gap.status = "matched"
+        gap.matched_delivery_id = delivery_id
+        return True
+
+    async def gaps_between(
+        self, *, start: datetime, end: datetime, camera_key: str | None = None
+    ) -> list[CameraDeliveryGap]:
+        stmt = select(CameraDeliveryGap).where(
+            CameraDeliveryGap.ha_trigger_at >= ensure_utc(start),
+            CameraDeliveryGap.ha_trigger_at <= ensure_utc(end),
+            CameraDeliveryGap.status == "missing",
+        )
+        if camera_key is not None:
+            stmt = stmt.where(CameraDeliveryGap.camera_key == camera_key)
+        rows = await self._session.scalars(stmt.order_by(CameraDeliveryGap.ha_trigger_at))
+        return list(rows.all())
+
+    # ----------------------------------------------------------------- #
+
+    async def get_state(self, camera_key: str) -> CameraPipelineState | None:
+        return await self._session.get(CameraPipelineState, camera_key)
+
+    async def all_states(self) -> list[CameraPipelineState]:
+        rows = await self._session.scalars(
+            select(CameraPipelineState).order_by(CameraPipelineState.camera_key)
+        )
+        return list(rows.all())
+
+    async def mark_checked(
+        self,
+        *,
+        camera_key: str,
+        checked_at: datetime,
+        checked_from: datetime,
+        checked_through: datetime,
+        last_verified_delivery_at: datetime | None,
+    ) -> None:
+        """Advance the reconciliation watermark for one camera.
+
+        ``checked_from`` is the earliest instant the pass actually examined, and
+        it becomes the boundary on first run. It is not the same as
+        ``checked_through``: a pass reads Home Assistant's recorder over a whole
+        lookback window, so the first pass legitimately verifies the preceding
+        hour rather than only the instant it ran. Using the watermark for both
+        would report an hour we genuinely checked as unknown.
+        """
+        state = await self.get_state(camera_key)
+        if state is None:
+            state = CameraPipelineState(
+                camera_key=camera_key,
+                last_checked_at=ensure_utc(checked_at),
+                checked_through=ensure_utc(checked_through),
+                first_checked_at=ensure_utc(checked_from),
+                last_verified_delivery_at=None,
+            )
+            self._session.add(state)
+        else:
+            state.last_checked_at = ensure_utc(checked_at)
+            state.checked_through = max(state.checked_through, ensure_utc(checked_through))
+        if last_verified_delivery_at is not None:
+            current = state.last_verified_delivery_at
+            moment = ensure_utc(last_verified_delivery_at)
+            if current is None or moment > current:
+                state.last_verified_delivery_at = moment

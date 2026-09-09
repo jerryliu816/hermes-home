@@ -79,6 +79,25 @@ class Settings(BaseSettings):
     #: never debounced -- see health/monitor.py for why those differ.
     camera_health_failure_threshold: int = Field(default=2, ge=1, le=10)
 
+    # Delivery reconciliation. Camera health says the camera was working; this
+    # says Home Assistant's events actually reached us. They are different
+    # failures with different causes, and one has already happened here without
+    # the other: on 2026-09-09 four triggers fired while the cameras were
+    # healthy and every one of the deliveries was lost in transit.
+    delivery_reconciliation_enabled: bool = True
+    delivery_reconciliation_interval_seconds: int = Field(default=300, ge=30, le=3600)
+    #: How far back each pass re-examines. Must exceed the interval so a pass
+    #: that is skipped or slow does not leave an unexamined hole.
+    delivery_reconciliation_lookback_seconds: int = Field(default=3600, ge=300)
+    #: How long a trigger is given to become a delivery before it counts as
+    #: missing. Must exceed the freshness budget plus vision time, or a delivery
+    #: still legitimately in flight is reported as lost.
+    delivery_settle_seconds: int = Field(default=90, ge=30, le=600)
+    #: Half-width of the window in which a delivery is considered to belong to
+    #: a trigger. The automation posts within milliseconds; this is slack for
+    #: clock skew between Home Assistant and here.
+    delivery_match_window_seconds: int = Field(default=30, ge=5, le=300)
+
     @property
     def camera_health_gap_tolerance_seconds(self) -> float:
         """How long a silence proves we stopped watching rather than merely idled.
@@ -232,6 +251,21 @@ class CameraConfig(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     camera_entity: str | None = None
     event_image_entity: str | None = None
+    #: The Home Assistant entity whose transition to "on" fires this camera's
+    #: automation -- the authoritative signal that a webhook should have been
+    #: delivered. Required for delivery reconciliation; without it a camera is
+    #: simply not reconciled.
+    #:
+    #: Stated explicitly rather than inferred from a naming convention, because
+    #: it is genuinely not uniform: this house's front door triggers on
+    #: `binary_sensor.front_door_person_detected` while every other camera uses
+    #: `*_motion_detected`. Guessing would silently reconcile the wrong entity.
+    #:
+    #: Deliberately NOT the event-image entity. Measured on real hardware: an
+    #: `image.*` entity advances for reasons other than detections (a refresh at
+    #: 09:03:39 with no motion, no person, and no automation run), so keying on
+    #: it would invent delivery gaps that never happened.
+    trigger_entity: str | None = None
     #: Entity the health monitor watches, when the camera entity is a poor proxy
     #: for whether the device is actually reachable. Defaults to camera_entity.
     health_entity: str | None = None
@@ -287,6 +321,10 @@ class CameraConfig(BaseModel):
     def health_check_entity(self) -> str | None:
         """The entity whose availability (and possibly state) means 'reachable'."""
         return self.health_entity or self.camera_entity
+
+    def reconcilable(self) -> bool:
+        """Whether this camera's deliveries can be checked against HA history."""
+        return bool(self.trigger_entity and self.event_image_entity)
 
 
 class CamerasConfig(BaseModel):

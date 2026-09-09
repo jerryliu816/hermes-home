@@ -145,6 +145,10 @@ must not be able to read `events: []` as "nothing happened" without also seeing
 whether anything was watching; requiring a second tool call guarantees it is
 sometimes skipped, and the time it is skipped is the time it mattered.
 
+Coverage is reported as `camera_health_coverage`, beside `field_of_view`
+(where cameras point) and `event_pipeline_coverage` (whether their events
+arrived). Three questions, three fields, never merged.
+
 | Tool | Coverage attached when |
 |---|---|
 | `home_recent_events` | camera or zone given |
@@ -211,6 +215,14 @@ affect vision processing.
 never consults Home Assistant reachability or a camera's status: an unplugged
 camera would otherwise make hermes-home unready and drive a container restart
 loop over exactly the condition it is designed to keep running through.
+
+## What this does *not* cover
+
+Camera health says the camera was working. It says nothing about whether its
+events reached hermes-home — a separate failure that has already occurred here
+on its own, with every camera healthy throughout. That axis is
+[event-pipeline.md](event-pipeline.md), and the two are reported side by side
+and never merged.
 
 ## Limitations
 

@@ -94,6 +94,13 @@ async def ready(
             "interval_seconds": state.settings.camera_health_interval_seconds,
         }
 
+    if state.settings.delivery_reconciliation_enabled:
+        reconciler = state.reconciler
+        checks["delivery_reconciliation"] = {
+            "ok": reconciler is not None and reconciler.running,
+            "interval_seconds": state.settings.delivery_reconciliation_interval_seconds,
+        }
+
     # MCP is how Hermes reads any of this.
     checks["mcp"] = {"ok": state.mcp_mounted, "path": "/mcp"}
 

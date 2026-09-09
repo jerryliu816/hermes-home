@@ -635,23 +635,23 @@ async def test_query_results_carry_zone_coverage(mcp_server) -> None:
     only in home_describe_home goes unread.
     """
     partial = await _call(mcp_server, "home_recent_events", {"zone": "backyard"})
-    assert partial["zone_coverage"]["status"] == "partial"
-    assert "weaker evidence" in partial["zone_coverage"]["note"]
+    assert partial["field_of_view"]["status"] == "partial"
+    assert "weaker evidence" in partial["field_of_view"]["note"]
     # Naming the cameras makes the gap concrete rather than abstract.
-    assert partial["zone_coverage"]["cameras"] == ["backyard", "cottage"]
-    assert "no camera's view" in partial["zone_coverage"]["note"]
+    assert partial["field_of_view"]["cameras"] == ["backyard", "cottage"]
+    assert "no camera's view" in partial["field_of_view"]["note"]
 
     none = await _call(mcp_server, "home_recent_events", {"zone": "garage"})
-    assert none["zone_coverage"]["status"] == "none"
-    assert "says nothing" in none["zone_coverage"]["note"]
+    assert none["field_of_view"]["status"] == "none"
+    assert "says nothing" in none["field_of_view"]["note"]
 
     full = await _call(mcp_server, "home_search_events", {"zone": "front_entry"})
-    assert full["zone_coverage"]["status"] == "full"
+    assert full["field_of_view"]["status"] == "full"
 
 
 async def test_no_zone_filter_means_no_coverage_note(mcp_server) -> None:
     """Nothing to qualify when the question was not about a place."""
-    assert "zone_coverage" not in await _call(mcp_server, "home_recent_events")
+    assert "field_of_view" not in await _call(mcp_server, "home_recent_events")
 
 
 def test_coverage_of_classifies_every_zone(cameras_config) -> None:

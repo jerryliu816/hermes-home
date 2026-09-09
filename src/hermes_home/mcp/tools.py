@@ -42,26 +42,36 @@ def _parse_time(value: str | None, *, field: str) -> datetime | None:
         ) from exc
 
 
-async def _coverage(
+async def _coverage_blocks(
     svc: EventService,
     *,
     start: datetime | None,
     end: datetime | None,
     camera: str | None,
     zone: str | None,
-) -> dict[str, Any] | None:
-    """Operational coverage for a bounded, place-filtered query.
+) -> dict[str, Any]:
+    """The two independent operational dimensions for a bounded, placed query.
 
     Attached automatically rather than left to a separate call: the caller must
     not be able to read ``events: []`` as "nothing happened" without also seeing
-    whether anything was watching. Requiring a second tool call to learn that
-    guarantees it will sometimes be skipped, and the one time it is skipped is
-    the time it mattered.
+    whether anything was watching and whether what was seen reached us. Making
+    either a separate tool Hermes has to remember to call would guarantee it is
+    sometimes skipped -- and the one time it is skipped is the time it mattered.
+
+    They are reported separately because they fail separately. On 2026-09-09
+    every camera was healthy and four deliveries were lost in transit; a single
+    merged "coverage" number would have had to pick one of those to report.
     """
     if start is None or end is None or (camera is None and zone is None):
-        return None
-    view = await svc.coverage_for(start=start, end=end, camera=camera, zone=zone)
-    return view.model_dump(mode="json") if view else None
+        return {}
+    blocks: dict[str, Any] = {}
+    health = await svc.coverage_for(start=start, end=end, camera=camera, zone=zone)
+    if health:
+        blocks["camera_health_coverage"] = health.model_dump(mode="json")
+    pipeline = await svc.pipeline_coverage_for(start=start, end=end, camera=camera, zone=zone)
+    if pipeline:
+        blocks["event_pipeline_coverage"] = pipeline.model_dump(mode="json")
+    return blocks
 
 
 def _coverage_note(state: AppState, zone: str | None) -> dict[str, Any] | None:
@@ -156,12 +166,12 @@ def register_tools(mcp: Any, state: AppState) -> None:
             }
             coverage = _coverage_note(state, zone)
             if coverage:
-                result["zone_coverage"] = coverage
-            operational = await _coverage(
-                svc, start=window_start, end=window_end, camera=camera, zone=zone
+                result["field_of_view"] = coverage
+            result.update(
+                await _coverage_blocks(
+                    svc, start=window_start, end=window_end, camera=camera, zone=zone
+                )
             )
-            if operational:
-                result["coverage"] = operational
             if not events:
                 # An empty window is the moment a caller is most likely to give
                 # up on this tool and go looking elsewhere. Say what does exist.
@@ -245,7 +255,9 @@ def register_tools(mcp: Any, state: AppState) -> None:
                 tags=tags,
                 limit=limit,
             )
-            operational = await _coverage(svc, start=start, end=end, camera=camera, zone=zone)
+            operational = await _coverage_blocks(
+                svc, start=start, end=end, camera=camera, zone=zone
+            )
         logger.info(
             "mcp.home_search_events",
             returned=len(events),
@@ -259,9 +271,8 @@ def register_tools(mcp: Any, state: AppState) -> None:
         }
         coverage = _coverage_note(state, zone)
         if coverage:
-            result["zone_coverage"] = coverage
-        if operational:
-            result["coverage"] = operational
+            result["field_of_view"] = coverage
+        result.update(operational)
         return result
 
     @mcp.tool(
@@ -344,18 +355,21 @@ def register_tools(mcp: Any, state: AppState) -> None:
         ] = None,
     ) -> dict[str, Any]:
         async with session_scope(state.session_factory) as session:
-            views = await service(session).camera_health(camera)
+            svc = service(session)
+            views = await svc.camera_health(camera)
+            pipeline = {v.key: await svc.pipeline_health(v.key) for v in views}
         if camera is not None and not views:
             return {"count": 0, "cameras": [], "error": f"no camera configured as {camera!r}"}
         by_status: dict[str, int] = {}
         for view in views:
             by_status[view.status] = by_status.get(view.status, 0) + 1
         logger.info("mcp.home_list_cameras", returned=len(views), camera=camera)
-        return {
-            "count": len(views),
-            "by_status": by_status,
-            "cameras": [v.model_dump(mode="json") for v in views],
-        }
+        cameras: list[dict[str, Any]] = []
+        for v in views:
+            row = v.model_dump(mode="json")
+            row["event_pipeline_health"] = pipeline[v.key].model_dump(mode="json")
+            cameras.append(row)
+        return {"count": len(views), "by_status": by_status, "cameras": cameras}
 
     @mcp.tool(
         name="home_coverage",
@@ -398,13 +412,27 @@ def register_tools(mcp: Any, state: AppState) -> None:
             }
 
         async with session_scope(state.session_factory) as session:
-            view = await service(session).coverage_for(
+            svc = service(session)
+            view = await svc.coverage_for(start=start, end=end, camera=camera, zone=zone)
+            pipeline = await svc.pipeline_coverage_for(
                 start=start, end=end, camera=camera, zone=zone
             )
         if view is None:
-            return {"error": f"no camera configured as {camera!r}", "coverage": None}
-        logger.info("mcp.home_coverage", camera=camera, zone=zone, complete=view.complete)
-        return view.model_dump(mode="json")
+            return {
+                "error": f"no camera configured as {camera!r}",
+                "camera_health_coverage": None,
+            }
+        logger.info(
+            "mcp.home_coverage",
+            camera=camera,
+            zone=zone,
+            health_complete=view.complete,
+            pipeline_complete=pipeline.complete if pipeline else None,
+        )
+        result: dict[str, Any] = {"camera_health_coverage": view.model_dump(mode="json")}
+        if pipeline:
+            result["event_pipeline_coverage"] = pipeline.model_dump(mode="json")
+        return result
 
     @mcp.tool(
         name="home_summarize_activity",
@@ -440,14 +468,13 @@ def register_tools(mcp: Any, state: AppState) -> None:
             summary = await svc.summarize_activity(
                 start=ensure_utc(start), end=ensure_utc(end), zone=zone, limit=limit
             )
-            operational = await _coverage(
+            operational = await _coverage_blocks(
                 svc, start=ensure_utc(start), end=ensure_utc(end), camera=camera, zone=zone
             )
         logger.info("mcp.home_summarize_activity", event_count=summary.event_count, zone=zone)
         result = summary.model_dump(mode="json")
         note = _coverage_note(state, zone)
         if note:
-            result["zone_coverage"] = note
-        if operational:
-            result["coverage"] = operational
+            result["field_of_view"] = note
+        result.update(operational)
         return result

@@ -160,7 +160,83 @@ class CoverageSpan(BaseModel):
     end: datetime
     status: str
     reason: str | None = None
+    meaning: str | None = Field(
+        default=None,
+        description=(
+            "Plain-language meaning of `reason`. A monitoring gap means WE stopped "
+            "observing, not that the camera failed -- do not report it as an outage."
+        ),
+    )
     camera: str | None = None
+    events_observed: int = Field(
+        default=0,
+        description=(
+            "Events actually recorded inside this unverified span. Any number above "
+            "zero is positive proof the camera and pipeline worked at those instants, "
+            "so never say 'nothing was recorded' about this period. It does NOT shorten "
+            "or resolve the span: the rest of it remains unobserved."
+        ),
+    )
+
+
+class PipelineGapView(BaseModel):
+    """One Home Assistant trigger that never reached hermes-home."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    camera: str
+    ha_trigger_timestamp: datetime
+    reason: str
+    meaning: str | None = None
+
+
+class PipelineCoverageView(BaseModel):
+    """Whether hermes-home was known to be receiving what Home Assistant sent.
+
+    A wholly separate failure from camera health, and one that camera health
+    cannot see: a camera can be healthy while every one of its events is lost
+    in transit. When `complete` is false, the stored event history is known to
+    be incomplete -- an empty result then means events are MISSING, not that
+    nothing happened.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start: datetime
+    end: datetime
+    complete: bool | None = Field(
+        description=(
+            "true = reconciliation was running and every Home Assistant trigger had a "
+            "matching delivery (a quiet period counts as true); false = deliveries are "
+            "known missing; null = reconciliation was not running, so nothing can be "
+            "claimed either way."
+        )
+    )
+    reason: str | None = None
+    meaning: str | None = None
+    cameras_considered: list[str] = Field(default_factory=list)
+    delivery_gaps: list[PipelineGapView] = Field(default_factory=list)
+    unknown_periods: list[CoverageSpan] = Field(default_factory=list)
+
+
+class CameraPipelineHealthView(BaseModel):
+    """Current delivery-path health for one camera."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = Field(description="healthy | degraded | unknown")
+    verification_mode: str = Field(
+        description=(
+            "active = a trigger was recently confirmed delivered end to end; "
+            "no_recent_trigger = reconciliation is running and finding nothing wrong, "
+            "but nothing has fired lately to exercise the path (a quiet camera, which "
+            "is normal and NOT a fault); passive = reconciliation is not running."
+        )
+    )
+    reason: str | None = None
+    last_verified_delivery_at: datetime | None = None
+    last_reconciliation_check_at: datetime | None = None
+    open_gap_count: int = 0
 
 
 class CoverageView(BaseModel):

@@ -445,3 +445,90 @@ class CameraHealthInterval(Base):
     __table_args__ = (
         Index("ix_camera_health_intervals_camera_started", "camera_key", "started_at"),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Delivery reconciliation: did Home Assistant's events actually reach us?
+# --------------------------------------------------------------------------- #
+
+
+class PipelineStatus:
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNKNOWN = "unknown"
+
+
+class VerificationMode:
+    #: A trigger fired recently and its delivery was confirmed end to end.
+    ACTIVE = "active"
+    #: Reconciliation is running and finding nothing wrong, but nothing has
+    #: fired lately to exercise the path.
+    NO_RECENT_TRIGGER = "no_recent_trigger"
+    #: Reconciliation is not running, so nothing is being checked.
+    PASSIVE = "passive"
+
+
+class DeliveryGapReason:
+    WEBHOOK_NOT_RECEIVED = "webhook_not_received"
+
+
+class CameraDeliveryGap(Base):
+    """A Home Assistant trigger that never became a delivery here.
+
+    Camera health cannot detect this. On 2026-09-09 four triggers fired while
+    every camera reported healthy and hermes-home was polling Home Assistant
+    successfully; the automations ran, and all four POSTs vanished in transit.
+    Nothing in the system noticed. This table is what notices.
+
+    ``ha_trigger_at`` is Home Assistant's own timestamp for the transition, not
+    ours, which is what makes the row idempotent: re-examining the same window
+    finds the same trigger instant and the UNIQUE constraint absorbs it.
+    """
+
+    __tablename__ = "camera_delivery_gaps"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    camera_key: Mapped[str] = mapped_column(String(64))
+    #: The entity whose transition should have produced a delivery.
+    trigger_entity: Mapped[str] = mapped_column(String(255))
+    ha_trigger_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    #: The event-image timestamp that followed, when one did. Recorded for
+    #: forensics only -- it is never used to decide whether a delivery is
+    #: missing, because an image entity advances without a detection.
+    ha_image_ts: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    detected_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+    status: Mapped[str] = mapped_column(String(16))  # missing|matched
+    reason: Mapped[str] = mapped_column(String(64))
+    #: Set if a late delivery turns up and claims this trigger.
+    matched_delivery_id: Mapped[int | None] = mapped_column(ForeignKey("event_deliveries.id"))
+
+    __table_args__ = (
+        UniqueConstraint("camera_key", "ha_trigger_at", name="camera_trigger_instant"),
+        Index("ix_camera_delivery_gaps_camera_trigger", "camera_key", "ha_trigger_at"),
+        Index("ix_camera_delivery_gaps_status", "status"),
+    )
+
+
+class CameraPipelineState(Base):
+    """How far delivery reconciliation has actually checked, per camera.
+
+    The same discipline as ``camera_health_intervals.observed_through`` and for
+    the same reason: without a watermark, "no gap rows" is indistinguishable
+    from "nobody was looking for gaps". Every period outside what was actually
+    checked is unknown, never clean.
+    """
+
+    __tablename__ = "camera_pipeline_state"
+
+    camera_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    #: When a reconciliation pass last completed for this camera.
+    last_checked_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    #: The end of the interval that pass actually examined. Trailing triggers
+    #: inside the settle window are excluded, so this lags ``last_checked_at``.
+    checked_through: Mapped[datetime] = mapped_column(UtcDateTime)
+    #: This camera's reconciliation boundary. Nothing before it is knowable.
+    first_checked_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    #: Last trigger confirmed delivered end to end. Evidence the path works,
+    #: distinct from evidence that we were watching it.
+    last_verified_delivery_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
