@@ -524,3 +524,121 @@ async def test_mcp_filters_by_every_camera_key(
 
     summary = await _call(mcp_server, "home_summarize_activity")
     assert summary["by_camera"] == dict.fromkeys(CAMERAS, 1)
+
+
+# --------------------------------------------------------------------------- #
+# Partial coverage
+#
+# Coverage was binary: watched or not. A camera that sees only the half of the
+# yard nearest the house made "the backyard is covered" true and misleading at
+# once -- the same over-claim as calling an unwatched zone quiet, one level
+# subtler.
+# --------------------------------------------------------------------------- #
+
+
+def test_backyard_is_covered_but_only_partly(cameras_config) -> None:
+    from hermes_home.spatial import zones_covered_by, zones_partially_covered_by
+
+    backyard = cameras_config.cameras["backyard"]
+    assert "backyard" in backyard.observes, "coverage must be legible on the camera too"
+    assert backyard.partial_coverage == ["backyard"]
+
+    assert "backyard" in zones_covered_by(cameras_config)
+    assert "backyard" in zones_partially_covered_by(cameras_config)
+
+
+def test_fully_covered_zones_are_not_reported_as_partial(cameras_config) -> None:
+    from hermes_home.spatial import zones_partially_covered_by
+
+    partial = zones_partially_covered_by(cameras_config)
+    assert "front_entry" not in partial
+    assert "driveway" not in partial
+    assert "rear_entry" not in partial, "the sliding doors are fully in frame"
+
+
+def test_full_coverage_by_another_camera_wins(cameras_config) -> None:
+    """If one camera sees only part of a zone but another sees all of it, the
+    zone is not partially covered -- otherwise adding a camera would make the
+    answer more pessimistic."""
+    from hermes_home.config import CamerasConfig
+    from hermes_home.spatial import zones_partially_covered_by
+
+    partial_only = CamerasConfig(cameras={"backyard": cameras_config.cameras["backyard"]})
+    assert "backyard" in zones_partially_covered_by(partial_only)
+
+    both = CamerasConfig(
+        cameras={
+            "backyard": cameras_config.cameras["backyard"],
+            # A second camera covering the whole yard.
+            "yard_wide": cameras_config.cameras["cottage"].model_copy(
+                update={"location": "backyard", "observes": [], "partial_coverage": []}
+            ),
+        }
+    )
+    assert "backyard" not in zones_partially_covered_by(both)
+
+
+def test_partial_coverage_must_name_a_zone_the_camera_covers(home_config) -> None:
+    """A typo here would silently claim nothing, so it fails at startup."""
+    from hermes_home.config import CameraConfig, CamerasConfig, validate_home_and_cameras
+    from hermes_home.core.errors import ConfigError
+
+    bogus = CamerasConfig(
+        cameras={
+            "b": CameraConfig(
+                name="B",
+                event_image_entity="image.b",
+                location="backyard",
+                observes=[],
+                partial_coverage=["driveway"],  # not covered by this camera at all
+            )
+        }
+    )
+    with pytest.raises(ConfigError, match="does not cover it"):
+        validate_home_and_cameras(home_config, bogus)
+
+
+async def test_describe_home_reports_partial_coverage(mcp_server) -> None:
+    home = await _call(mcp_server, "home_describe_home")
+
+    assert home["partially_observed_zones"] == ["backyard"]
+    assert "backyard" not in home["unobserved_zones"], "partly watched is not unwatched"
+    assert "garage" in home["unobserved_zones"]
+
+    by_key = {c["key"]: c for c in home["cameras"]}
+    assert by_key["backyard"]["partial_coverage"] == ["backyard"]
+    assert by_key["front_door"]["partial_coverage"] == []
+
+
+async def test_query_results_carry_zone_coverage(mcp_server) -> None:
+    """The caveat has to travel with the answer.
+
+    An agent asked "did anything happen in the backyard" calls a query tool and
+    never thinks to ask about coverage separately, so partial coverage stated
+    only in home_describe_home goes unread.
+    """
+    partial = await _call(mcp_server, "home_recent_events", {"zone": "backyard"})
+    assert partial["zone_coverage"]["status"] == "partial"
+    assert "weaker evidence" in partial["zone_coverage"]["note"]
+
+    none = await _call(mcp_server, "home_recent_events", {"zone": "garage"})
+    assert none["zone_coverage"]["status"] == "none"
+    assert "says nothing" in none["zone_coverage"]["note"]
+
+    full = await _call(mcp_server, "home_search_events", {"zone": "front_entry"})
+    assert full["zone_coverage"]["status"] == "full"
+
+
+async def test_no_zone_filter_means_no_coverage_note(mcp_server) -> None:
+    """Nothing to qualify when the question was not about a place."""
+    assert "zone_coverage" not in await _call(mcp_server, "home_recent_events")
+
+
+def test_coverage_of_classifies_every_zone(cameras_config) -> None:
+    from hermes_home.spatial import coverage_of
+
+    assert coverage_of(cameras_config, "backyard") == "partial"
+    assert coverage_of(cameras_config, "front_entry") == "full"
+    assert coverage_of(cameras_config, "driveway") == "full"
+    assert coverage_of(cameras_config, "garage") == "none"
+    assert coverage_of(cameras_config, "street") == "none"

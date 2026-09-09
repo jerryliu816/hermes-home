@@ -101,6 +101,33 @@ cameras:
 Cross-references are validated at startup: a camera pointing at a zone that does
 not exist fails immediately, naming the typo, rather than at 3am on a real event.
 
+## Coverage is three-valued, not two
+
+A zone is `full`, `partial` or `none`. The middle case matters: the backyard
+camera sits on the shed and sees the half of the yard nearest the house, so
+"the backyard is covered" is true and misleading at the same time — the same
+over-claim as calling an unwatched zone quiet, one level subtler.
+
+Declare it on the camera:
+
+```yaml
+backyard:
+  location: backyard
+  observes: [backyard, rear_entry]
+  partial_coverage: [backyard]      # sees only part of this one
+```
+
+Startup rejects a `partial_coverage` entry naming a zone the camera does not
+cover at all, and full coverage by any other camera wins — adding a camera can
+never make the reported coverage more pessimistic.
+
+`home_describe_home` reports `partially_observed_zones` alongside
+`unobserved_zones`, and every zone-filtered query result carries a
+`zone_coverage` block. The second one matters more in practice: an agent asked
+"did anything happen in the backyard" calls a query tool and never thinks to ask
+about coverage separately, so a caveat that lives only in `describe_home` goes
+unread.
+
 ## Coverage, and why it is reported
 
 `home_describe_home` returns `unobserved_zones` — zones no camera watches. This

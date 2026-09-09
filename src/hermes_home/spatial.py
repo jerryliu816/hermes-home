@@ -194,6 +194,32 @@ def cameras_observing(cameras: CamerasConfig, zone_key: str) -> list[str]:
     )
 
 
+def coverage_of(cameras: CamerasConfig, zone_key: str) -> str:
+    """How well a zone is watched: ``full``, ``partial`` or ``none``.
+
+    Returned alongside query results so an agent answering "did anything happen
+    in X" can qualify an empty answer without having to think to ask about
+    coverage separately.
+    """
+    if zone_key not in zones_covered_by(cameras):
+        return "none"
+    return "partial" if zone_key in zones_partially_covered_by(cameras) else "full"
+
+
+def zones_partially_covered_by(cameras: CamerasConfig) -> set[str]:
+    """Zones some camera sees only part of.
+
+    A zone another camera covers fully is not partial: full coverage wins.
+    """
+    partial: set[str] = set()
+    full: set[str] = set()
+    for camera in cameras.cameras.values():
+        declared = set(camera.partial_coverage)
+        partial |= declared
+        full |= ({camera.location, *camera.observes}) - declared
+    return partial - full
+
+
 def zones_covered_by(cameras: CamerasConfig) -> set[str]:
     """Every zone some camera can see. The rest of the house is unobserved."""
     covered: set[str] = set()

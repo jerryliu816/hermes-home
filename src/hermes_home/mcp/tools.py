@@ -25,6 +25,7 @@ from pydantic import Field
 from hermes_home.api.deps import AppState
 from hermes_home.core.time import ensure_utc, now_utc, parse_ha_timestamp
 from hermes_home.services.event_service import MAX_LIMIT, EventService
+from hermes_home.spatial import coverage_of
 from hermes_home.storage.engine import session_scope
 
 logger = structlog.get_logger(__name__)
@@ -39,6 +40,25 @@ def _parse_time(value: str | None, *, field: str) -> datetime | None:
         raise ValueError(
             f"{field} must be ISO 8601 with a UTC offset, e.g. 2026-09-08T15:00:00Z"
         ) from exc
+
+
+def _coverage_note(state: AppState, zone: str | None) -> dict[str, Any] | None:
+    """Describe how well a zone is watched, for attaching to a query result."""
+    if not zone:
+        return None
+    status = coverage_of(state.cameras, zone)
+    note = {
+        "none": (
+            f"No camera watches {zone}. An absence of events says nothing about what "
+            "happened there."
+        ),
+        "partial": (
+            f"Only part of {zone} is in view of a camera. An absence of events is "
+            "weaker evidence here than in a fully covered zone."
+        ),
+        "full": f"{zone} is fully covered by at least one camera.",
+    }[status]
+    return {"zone": zone, "status": status, "note": note}
 
 
 def register_tools(mcp: Any, state: AppState) -> None:
@@ -97,6 +117,9 @@ def register_tools(mcp: Any, state: AppState) -> None:
                 "count": len(events),
                 "events": [e.model_dump(mode="json") for e in events],
             }
+            coverage = _coverage_note(state, zone)
+            if coverage:
+                result["zone_coverage"] = coverage
             if not events:
                 # An empty window is the moment a caller is most likely to give
                 # up on this tool and go looking elsewhere. Say what does exist.
@@ -117,7 +140,15 @@ def register_tools(mcp: Any, state: AppState) -> None:
                         "watches records nothing, which is not the same as nothing "
                         "having happened."
                     )
-        logger.info("mcp.home_recent_events", minutes=minutes, returned=len(events), camera=camera)
+        # zone included: without it a zone-filtered empty result is
+        # indistinguishable from a broken query when reading the trail.
+        logger.info(
+            "mcp.home_recent_events",
+            minutes=minutes,
+            returned=len(events),
+            camera=camera,
+            zone=zone,
+        )
         return result
 
     @mcp.tool(
@@ -174,7 +205,14 @@ def register_tools(mcp: Any, state: AppState) -> None:
             zone=zone,
             event_type=event_type,
         )
-        return {"count": len(events), "events": [e.model_dump(mode="json") for e in events]}
+        result: dict[str, Any] = {
+            "count": len(events),
+            "events": [e.model_dump(mode="json") for e in events],
+        }
+        coverage = _coverage_note(state, zone)
+        if coverage:
+            result["zone_coverage"] = coverage
+        return result
 
     @mcp.tool(
         name="home_get_event",
@@ -216,9 +254,11 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "The layout of the property: zones, their relationships, the cameras and what "
             "each observes, and which zones nothing watches. Use for 'what can you see?', "
             "'which cameras are there?', 'is the backyard covered?'\n\n"
-            "Read unobserved_zones carefully: a zone no camera watches records nothing, "
-            "so silence from it is not evidence that nothing happened. Say so rather "
-            "than reporting an all-clear."
+            "Two fields qualify what silence means. unobserved_zones: no camera "
+            "watches it at all, so an absence of events says nothing about what "
+            "happened. partially_observed_zones: a camera sees only part of it, so an "
+            "absence is weaker evidence than in a fully covered zone. In both cases "
+            "say what is actually known instead of reporting an all-clear."
         ),
     )
     async def home_describe_home() -> dict[str, Any]:

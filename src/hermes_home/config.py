@@ -202,6 +202,12 @@ class CameraConfig(BaseModel):
     )
     location: str
     observes: list[str] = Field(default_factory=list)
+    #: Zones this camera sees only part of. Coverage is otherwise treated as
+    #: binary, and "the backyard is covered" over-claims when the camera sees
+    #: only the half nearest the house -- the same mistake as calling an
+    #: unwatched zone quiet, one level subtler. Must name zones the camera
+    #: actually covers (its location, or something it observes).
+    partial_coverage: list[str] = Field(default_factory=list)
 
     @field_validator("event_image_strategy")
     @classmethod
@@ -256,6 +262,15 @@ def validate_home_and_cameras(home: HomeConfig, cameras: CamerasConfig) -> None:
         for observed in camera.observes:
             if observed not in known:
                 problems.append(f"camera {key!r} observes unknown zone {observed!r}")
+        covered = {camera.location, *camera.observes}
+        for partial in camera.partial_coverage:
+            if partial not in known:
+                problems.append(f"camera {key!r} partial_coverage names unknown zone {partial!r}")
+            elif partial not in covered:
+                problems.append(
+                    f"camera {key!r} lists {partial!r} as partial coverage but does not "
+                    "cover it at all"
+                )
     for rel in home.relationships:
         for endpoint in (rel.from_zone, rel.to_zone):
             if endpoint not in known:

@@ -65,6 +65,9 @@ READING RESULTS
   from a mock or test provider, say so when reporting the interpretation.
 - A zone in unobserved_zones has no camera. Silence from it means nothing was
   recorded, not that nothing happened.
+- A zone in partially_observed_zones is only partly covered -- one camera sees
+  the near half of the yard, say. No events there is weaker evidence than in a
+  fully covered zone; qualify the answer rather than giving an all-clear.
 """
 
 

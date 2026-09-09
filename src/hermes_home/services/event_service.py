@@ -30,6 +30,7 @@ from hermes_home.spatial import (
     zone_by_key,
     zone_relations,
     zones_covered_by,
+    zones_partially_covered_by,
 )
 from hermes_home.storage.models import Event, EventAnalysis, EventTag, Incident, Zone
 from hermes_home.storage.repositories import EventRepository
@@ -148,10 +149,12 @@ class EventService:
                     aliases=list(camera.aliases),
                     located_in=camera.location,
                     observes=sorted(camera.observes),
+                    partial_coverage=sorted(camera.partial_coverage),
                 )
                 for key, camera in sorted(self._cameras.cameras.items())
             ],
             unobserved_zones=sorted(z.key for z in zones if z.key not in covered),
+            partially_observed_zones=sorted(zones_partially_covered_by(self._cameras)),
         )
 
     # ----------------------------------------------------------------- #

@@ -217,8 +217,12 @@ async def test_observing_a_zone_no_camera_watches_returns_nothing(
     from hermes_home.spatial import entities_observing
 
     async with session_scope(session_factory) as session:
-        assert await entities_observing(session, "backyard") == []
+        # Nothing looks inside the garage or at the street.
+        assert await entities_observing(session, "garage") == []
+        assert await entities_observing(session, "street") == []
         assert await entities_observing(session, "no_such_zone") == []
+        # ...whereas the backyard camera does declare the yard it stands in.
+        assert await entities_observing(session, "backyard") != []
 
 
 def test_cameras_observing_reads_config(cameras_config) -> None:

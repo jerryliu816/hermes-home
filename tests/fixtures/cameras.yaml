@@ -70,14 +70,19 @@ cameras:
 
   backyard:
     name: Backyard
-    # On the storage shed, aimed back at the main house: covers about half the
-    # yard plus the two sliding doors.
+    # On the storage shed, aimed back at the main house. It covers the half of
+    # the yard nearest the house plus the two sliding doors -- listed explicitly
+    # under both `observes` and `partial_coverage` so a quiet backyard is
+    # reported as partly-watched rather than as an all-clear.
     camera_entity: camera.backyard
     event_image_entity: image.backyard_event_image
     event_image_strategy: image_entity_state
     location: backyard
     observes:
+      - backyard
       - rear_entry
+    partial_coverage:
+      - backyard
 
   cottage:
     name: Cottage

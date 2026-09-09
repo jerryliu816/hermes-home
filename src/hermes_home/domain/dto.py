@@ -89,6 +89,10 @@ class CameraView(BaseModel):
     )
     located_in: str
     observes: list[str] = Field(default_factory=list)
+    partial_coverage: list[str] = Field(
+        default_factory=list,
+        description="Zones this camera sees only part of.",
+    )
 
 
 class HomeView(BaseModel):
@@ -100,6 +104,13 @@ class HomeView(BaseModel):
     cameras: list[CameraView]
     unobserved_zones: list[str] = Field(
         description="Zones no camera watches. Absence of events there means nothing."
+    )
+    partially_observed_zones: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Zones only partly covered. An absence of events is weaker evidence here "
+            "than in a fully covered zone -- say so rather than reporting an all-clear."
+        ),
     )
 
 
