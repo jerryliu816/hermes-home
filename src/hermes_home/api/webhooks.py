@@ -148,6 +148,9 @@ async def receive_home_assistant_event(
             event_type=payload.event_type,
             camera=payload.camera,
             detail="commit reported success but the row was not visible to a fresh connection",
+            # Identity, so the first question after a failure -- "which file was
+            # it actually writing to?" -- is already answered in the log.
+            **{f"db_{k}": v for k, v in state.database_identity.items()},
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

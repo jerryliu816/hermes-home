@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from fastapi import Request
@@ -45,6 +45,8 @@ class AppState:
     #: without one; the webhook falls back to the main engine and says so.
     verify_engine: AsyncEngine | None = None
     #: Result of PRAGMA quick_check at startup. Reported, never acted on.
+    #: Absolute path, device and inode of the database actually in use.
+    database_identity: dict = field(default_factory=dict)
     integrity_ok: bool = True
     integrity_detail: str = "ok"
     expected_revision: str | None = None

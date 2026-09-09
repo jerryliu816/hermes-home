@@ -114,6 +114,34 @@ Restoring a pre-migration snapshot from `data/backups/` works the same way.
 Note that a rollback across a migration discards events recorded since the
 snapshot — check what you would lose first with `make db-shell`.
 
+## Never read the live database from the host
+
+**Do not run `sqlite3 data/hermes-home.db` on the Mac while the container is
+running.** Not as a convenience, not for a quick count.
+
+This is measured, not theoretical. With a container committing one row per
+second to a WAL database on the bind mount, a host reader saw a **frozen count
+across five consecutive backups**, and by the end **16 committed rows had been
+permanently lost** — gone from the writer's own connection, gone from fresh
+connections, with **no error raised anywhere**. Sixty commits reported success;
+forty-four survived.
+
+The WAL index lives in shared memory that virtiofs does not carry across the
+host/VM boundary, so the two sides disagree about what is committed, and the
+loser is whoever wrote last. The bind mount is not unreliable on its own — the
+container wrote to it happily for hours. The hazard is *concurrent host access*.
+
+To inspect the live database, go through the container, where there is one
+kernel and one view:
+
+```bash
+docker exec hermes-home python -c "import sqlite3; ..."
+docker exec hermes-home sqlite3 /data/hermes-home.db "select count(*) from events;"
+```
+
+`make backup` now takes its snapshot inside the container automatically, and
+falls back to the host only when the container is stopped.
+
 ## Backup and restore
 
 `make backup` writes to `~/hermes-home-backups/<UTC timestamp>/`:

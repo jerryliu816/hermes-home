@@ -16,7 +16,37 @@ OUT="$DEST/$STAMP"
 [ -f "$DB" ] || { echo "no database at $DB" >&2; exit 1; }
 mkdir -p "$OUT"
 
-sqlite3 "$DB" ".backup '$OUT/hermes-home.db'"
+# Run the snapshot INSIDE the container when one is running.
+#
+# Reading this database from the host while the container holds it open is not
+# safe on a macOS bind mount, and this is measured rather than theoretical: with
+# a container committing one row per second, a host reader saw a frozen count
+# across five consecutive backups, and 16 committed rows were permanently lost
+# -- invisible afterwards even to the connection that wrote them, with no error
+# raised anywhere. The WAL index lives in shared memory that virtiofs does not
+# carry across the boundary, so the two sides disagree about what is committed
+# and the loser is whoever wrote last.
+#
+# A backup taken from the host is therefore both unreliable (a stale snapshot)
+# and actively destructive (it can discard recent transactions). Inside the
+# container there is exactly one kernel and one view, and both problems vanish.
+CONTAINER="${CONTAINER:-hermes-home}"
+if docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
+    docker exec "$CONTAINER" python -c "
+import sqlite3, sys
+src = sqlite3.connect('/data/hermes-home.db')
+dst = sqlite3.connect('/data/.backup-tmp.db')
+with dst:
+    src.backup(dst)
+dst.close(); src.close()
+"
+    mv "$ROOT/data/.backup-tmp.db" "$OUT/hermes-home.db"
+    echo "  source:    container ($CONTAINER)"
+else
+    # Nothing else has the database open, so the host is the only reader.
+    sqlite3 "$DB" ".backup '$OUT/hermes-home.db'"
+    echo "  source:    host (container not running)"
+fi
 
 # Configuration: the house description, plus the secrets file. .env is included
 # because a restore without it cannot talk to Home Assistant -- so the backup

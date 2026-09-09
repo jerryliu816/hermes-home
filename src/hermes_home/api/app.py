@@ -33,6 +33,7 @@ from hermes_home.storage.engine import (
     create_session_factory,
     create_verification_engine,
     current_revision,
+    database_identity,
     head_revision,
     quick_check,
     session_scope,
@@ -86,6 +87,12 @@ async def build_state(settings: Settings, *, start_worker: bool = True) -> AppSt
     # Structural sanity, reported and never repaired. A corrupt database is a
     # situation for a human and a backup; repairing automatically would destroy
     # the evidence of what went wrong.
+    # Which file we are actually writing to, by device and inode. Cheap, and
+    # the difference between diagnosing a path problem in seconds and guessing
+    # at it for hours.
+    state.database_identity = await database_identity(engine)
+    logger.info("database.identity", **state.database_identity)
+
     state.integrity_ok, state.integrity_detail = await quick_check(engine)
     if not state.integrity_ok:
         logger.error("database.quick_check_failed", detail=state.integrity_detail)

@@ -24,6 +24,7 @@ connection before answering 202.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -79,6 +80,39 @@ def create_verification_engine(database_url: str) -> AsyncEngine:
     engine = create_async_engine(database_url, echo=False, future=True, poolclass=NullPool)
     event.listens_for(engine.sync_engine, "connect")(_apply_sqlite_pragmas)
     return engine
+
+
+async def database_identity(engine: AsyncEngine) -> dict[str, object]:
+    """Which file, exactly, is this engine writing to?
+
+    Recorded because "the database" is an assumption, not an observation. A
+    process can hold an open handle to a file that has been renamed or replaced
+    underneath it and keep writing happily into something nothing else will ever
+    read. Device and inode are what distinguish that from the healthy case, and
+    they cost one stat call at startup.
+    """
+    info: dict[str, object] = {}
+    try:
+        async with engine.connect() as conn:
+            rows = (await conn.execute(text("PRAGMA database_list"))).all()
+            for _seq, name, file in rows:
+                if name == "main":
+                    info["path"] = file or ":memory:"
+            info["journal_mode"] = await conn.scalar(text("PRAGMA journal_mode"))
+            info["synchronous"] = await conn.scalar(text("PRAGMA synchronous"))
+        path = info.get("path")
+        if isinstance(path, str) and path and path != ":memory:":
+            st = os.stat(path)
+            info["device"] = st.st_dev
+            info["inode"] = st.st_ino
+            info["size_bytes"] = st.st_size
+            try:
+                info["wal_bytes"] = os.stat(path + "-wal").st_size
+            except OSError:
+                info["wal_bytes"] = 0
+    except Exception as exc:  # identity is diagnostic, never load-bearing
+        info["error"] = f"{type(exc).__name__}: {exc}"
+    return info
 
 
 async def confirm_delivery_durable(engine: AsyncEngine, delivery_uid: str) -> bool:
