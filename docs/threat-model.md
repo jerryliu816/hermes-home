@@ -136,7 +136,11 @@ Stated plainly, because an unstated limitation is worse than a known one.
 - **Denial of service.** An attacker who knows the secret can flood the queue.
   Retries are bounded and images are size-capped, but there is no rate limiting.
 - **Tampering with the database.** No integrity signing; anyone who can write
-  `data/hermes-home.db` can rewrite history.
+  `data/hermes-home.db` can rewrite history. They can also destroy it by
+  accident: opening the live database from macOS while the container runs has
+  been measured discarding committed transactions with no error raised. Use
+  `make db-query` / `make db-snapshot`; see
+  [operations.md](operations.md#never-read-the-live-database-from-the-host).
 - **Automatic login** (if enabled for unattended reboot) means an unlocked Mac.
   That is a genuine tradeoff and why it is not enabled by default.
 

@@ -236,6 +236,8 @@ curl -i -X POST "http://$HERMES_HOST_IP:8099/api/v1/events/home-assistant" \
 Expect `202` and a `delivery_uid`. Then:
 
 ```bash
-sqlite3 data/hermes-home.db \
-  "SELECT uid, status, disposition FROM event_deliveries ORDER BY id DESC LIMIT 1;"
+make db-query SQL="SELECT uid, status, disposition FROM event_deliveries ORDER BY id DESC LIMIT 1"
 ```
+
+Never `sqlite3 data/hermes-home.db` from the Mac while the service is running —
+see [operations.md](operations.md#never-read-the-live-database-from-the-host).

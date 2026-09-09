@@ -44,7 +44,7 @@ dst.close(); src.close()
     echo "  source:    container ($CONTAINER)"
 else
     # Nothing else has the database open, so the host is the only reader.
-    sqlite3 "$DB" ".backup '$OUT/hermes-home.db'"
+    sqlite3 "$DB" ".backup '$OUT/hermes-home.db'"  # host-db-ok: container is stopped
     echo "  source:    host (container not running)"
 fi
 

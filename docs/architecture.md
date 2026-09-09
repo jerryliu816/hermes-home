@@ -63,6 +63,18 @@ Durability comes before the acknowledgement: the delivery row is committed
 *then* 202 is returned, so an accepted event survives a crash a millisecond
 later. Measured: **~5 ms**, and still ~4 ms with Home Assistant unreachable.
 
+## What a 202 promises
+
+The webhook answers `202` only after re-reading the delivery through a fresh
+connection that did not perform the write. A commit reporting success is not
+proof a row exists — that failure has happened here — and a row is always
+visible to its own writer, so only an uninvolved reader can attest to it. If the
+re-read fails, the webhook returns 503 and never logs `webhook.accepted`.
+
+The database runs WAL with `synchronous=FULL`, and `PRAGMA quick_check` runs at
+startup, reported and never repaired. Details and the measured limits of fsync
+on a bind mount are in [operations.md](operations.md).
+
 ## Why SQLite is the queue
 
 For one home this is a handful of events a day. A broker would add an

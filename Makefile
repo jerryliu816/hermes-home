@@ -5,9 +5,13 @@
 COMPOSE := docker compose
 SERVICE := hermes-home
 DB      := data/hermes-home.db
+#: Path inside the container. All live-database access uses this, never the
+#: host path -- see the "Database access" section below.
+CONTAINER_DB := /data/hermes-home.db
 
 .PHONY: help start stop restart status logs follow ready health upgrade rollback \
-        backup restore build test lint shell db-shell prune
+        backup restore build test lint shell prune \
+        db-shell db-shell-rw db-query db-check db-snapshot
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -76,8 +80,34 @@ restore:  ## Restore from a backup: make restore FROM=<dir>
 prune:  ## Drop raw webhook bodies past the retention horizon
 	$(COMPOSE) exec $(SERVICE) hermes-home db prune
 
-db-shell:  ## Open sqlite3 against the live database (read-only is safer)
-	sqlite3 $(DB)
+# --- Database access --------------------------------------------------------
+#
+# Every one of these runs INSIDE the container, and that is not a style choice.
+# Opening the live database from macOS while the container holds it open has
+# been measured destroying committed transactions silently: 60 commits, 44
+# survivors, no error raised. See docs/operations.md.
+
+db-shell:  ## Open a read-only sqlite3 shell on the live database (in-container)
+	$(COMPOSE) exec $(SERVICE) sqlite3 -readonly $(CONTAINER_DB)
+
+db-shell-rw:  ## Writable sqlite3 shell on the live database (in-container). Careful.
+	$(COMPOSE) exec $(SERVICE) sqlite3 $(CONTAINER_DB)
+
+db-query:  ## Run one SQL statement: make db-query SQL="select count(*) from events"
+	@test -n "$(SQL)" || { echo 'usage: make db-query SQL="select count(*) from events"'; exit 1; }
+	@$(COMPOSE) exec -T $(SERVICE) sqlite3 -readonly -header -column $(CONTAINER_DB) "$(SQL)"
+
+db-check:  ## Integrity-check the live database (in-container, read-only, no repair)
+	@echo "quick_check:"
+	@$(COMPOSE) exec -T $(SERVICE) sqlite3 -readonly $(CONTAINER_DB) "PRAGMA quick_check;" | sed 's/^/  /'
+	@echo "integrity_check:"
+	@$(COMPOSE) exec -T $(SERVICE) sqlite3 -readonly $(CONTAINER_DB) "PRAGMA integrity_check;" | sed 's/^/  /'
+	@echo "settings:"
+	@$(COMPOSE) exec -T $(SERVICE) sqlite3 -readonly $(CONTAINER_DB) \
+	    "PRAGMA journal_mode; PRAGMA synchronous;" | sed 's/^/  /'
+
+db-snapshot:  ## Consistent snapshot to ./data/snapshots for safe host-side analysis
+	@./scripts/snapshot.sh
 
 shell:  ## Shell inside the running container
 	$(COMPOSE) exec $(SERVICE) sh

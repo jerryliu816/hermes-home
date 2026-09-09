@@ -40,8 +40,10 @@ fi
 cp "$BACKUP_DB" "$DB"
 
 echo "restored from $SRC"
-echo "  events:   $(sqlite3 "$DB" 'SELECT count(*) FROM events;')"
-echo "  revision: $(sqlite3 "$DB" 'SELECT version_num FROM alembic_version;')"
+# host-db-ok: restore refuses to run unless the service is stopped (checked
+# above), so nothing else holds the database while these read it.
+echo "  events:   $(sqlite3 "$DB" 'SELECT count(*) FROM events;')"  # host-db-ok
+echo "  revision: $(sqlite3 "$DB" 'SELECT version_num FROM alembic_version;')"  # host-db-ok
 echo
 echo "The config and .env in the backup were NOT restored automatically."
 echo "Copy them by hand if this is a rebuild rather than a rollback:"

@@ -142,10 +142,16 @@ confident all-clear over exactly the strip nothing watches.
 
 `home_describe_home` reports `partially_observed_zones` alongside
 `unobserved_zones`, and every zone-filtered query result carries a
-`zone_coverage` block. The second one matters more in practice: an agent asked
+`field_of_view` block. The second one matters more in practice: an agent asked
 "did anything happen in the backyard" calls a query tool and never thinks to ask
 about coverage separately, so a caveat that lives only in `describe_home` goes
 unread.
+
+`field_of_view` is one of three independent blocks on a query result, and they
+answer different questions: where cameras point, whether they were working
+(`camera_health_coverage`), and whether their events reached us
+(`event_pipeline_coverage`). See [camera-health.md](camera-health.md) and
+[event-pipeline.md](event-pipeline.md).
 
 ## Coverage, and why it is reported
 

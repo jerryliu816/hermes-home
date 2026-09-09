@@ -116,8 +116,14 @@ snapshot — check what you would lose first with `make db-shell`.
 
 ## Never read the live database from the host
 
-**Do not run `sqlite3 data/hermes-home.db` on the Mac while the container is
-running.** Not as a convenience, not for a quick count.
+> **DO NOT open `data/hermes-home.db`, `-wal` or `-shm` directly from macOS while
+> hermes-home is running.**
+>
+> The database is SQLite in WAL mode inside Docker. Direct host access across
+> Docker Desktop's virtiofs boundary has been **reproduced causing committed
+> transactions to disappear with no error**.
+
+Not as a convenience, not for a quick count.
 
 This is measured, not theoretical. With a container committing one row per
 second to a WAL database on the bind mount, a host reader saw a **frozen count
@@ -131,16 +137,42 @@ host/VM boundary, so the two sides disagree about what is committed, and the
 loser is whoever wrote last. The bind mount is not unreliable on its own — the
 container wrote to it happily for hours. The hazard is *concurrent host access*.
 
-To inspect the live database, go through the container, where there is one
-kernel and one view:
+### Supported commands
 
-```bash
-docker exec hermes-home python -c "import sqlite3; ..."
-docker exec hermes-home sqlite3 /data/hermes-home.db "select count(*) from events;"
+Everything below runs the SQLite access inside the container. Use these; there
+is no reason to reach for `sqlite3` on the Mac.
+
+| Need | Command |
+|---|---|
+| One query | `make db-query SQL="select count(*) from events"` |
+| Interactive shell (read-only) | `make db-shell` |
+| Interactive shell (writable) | `make db-shell-rw` |
+| Integrity check | `make db-check` |
+| Backup | `make backup` |
+| Host-readable copy | `make db-snapshot` |
+
+`make db-snapshot` takes the copy in-container with SQLite's backup API and only
+then moves the finished, closed file to `./data/snapshots/`. That copy has no
+live WAL and nothing else holds it, so **the host may open it freely** — it is
+the supported way to do host-side analysis.
+
+```console
+$ make db-snapshot
+snapshot: .../data/snapshots/hermes-home-20260909-215152.db
+  integrity:  ok
+  events:     27
+
+$ sqlite3 data/snapshots/hermes-home-20260909-215152.db   # safe: a closed copy
 ```
 
-`make backup` now takes its snapshot inside the container automatically, and
-falls back to the host only when the container is stopped.
+`make backup` also snapshots inside the container, falling back to the host only
+when the container is stopped. `make restore` refuses to run at all while the
+service is up.
+
+A test enforces this: `tests/test_host_db_access_guard.py` fails if any
+committed command opens the live database from the host. The three legitimate
+host-side reads (after the service is stopped) carry an explicit `host-db-ok`
+marker stating why.
 
 ## Backup and restore
 

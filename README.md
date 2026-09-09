@@ -117,6 +117,13 @@ knew what a camera was.
 external services. It restarts itself, survives reboots, and backs up with
 `make backup`.
 
+> One operational rule, learned the hard way: **never open the database from
+> macOS while the container is running.** Use `make db-query`, `make db-shell`,
+> `make db-check`, or `make db-snapshot` for a host-readable copy. Direct host
+> access across Docker's virtiofs boundary has been measured destroying
+> committed transactions silently — see
+> [operations.md](docs/operations.md#never-read-the-live-database-from-the-host).
+
 ## What it is not
 
 It does not replace Home Assistant, control any device, or watch live video.
@@ -259,7 +266,7 @@ once volume grows.
 ## Development
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 308 tests, no network, no credentials
+.venv/bin/python -m pytest tests/ -q      # 327 tests, no network, no credentials
 .venv/bin/ruff check src/ tests/
 .venv/bin/ruff format src/ tests/
 ```
