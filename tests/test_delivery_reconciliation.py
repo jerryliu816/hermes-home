@@ -97,6 +97,29 @@ async def deliver(session_factory, camera_key: str, entity: str, at: datetime) -
         )
 
 
+async def prime(session_factory, *camera_keys: str, since_minutes: int = 120) -> None:
+    """Put the reconciler past its first pass, as production is within minutes.
+
+    The first pass only establishes the boundary -- it cannot know whether an
+    automation existed before it started watching -- so every steady-state test
+    needs a boundary already in place.
+    """
+    from hermes_home.storage.models import CameraPipelineState
+
+    boundary = now_utc() - timedelta(minutes=since_minutes)
+    async with session_scope(session_factory) as session:
+        for key in camera_keys:
+            session.add(
+                CameraPipelineState(
+                    camera_key=key,
+                    last_checked_at=boundary,
+                    checked_through=boundary,
+                    first_checked_at=boundary,
+                    last_verified_delivery_at=None,
+                )
+            )
+
+
 async def open_gaps(session_factory, camera_key: str | None = None) -> list:
     async with session_scope(session_factory) as session:
         return await DeliveryGapRepository(session).gaps_between(
@@ -142,6 +165,7 @@ async def test_trigger_with_matching_delivery_is_no_gap(session_factory, setting
     when = now_utc() - timedelta(minutes=10)
     fired(ha, "binary_sensor.test_motion_detected", when)
     await deliver(session_factory, "test", "image.test_event_image", when)
+    await prime(session_factory, "test")
 
     outcome = (
         await reconciler(session_factory, settings, cameras_of(test=camera()), ha).reconcile_once()
@@ -158,6 +182,7 @@ async def test_trigger_without_delivery_is_detected(session_factory, settings) -
     ha = HistoryHA()
     when = now_utc() - timedelta(minutes=10)
     fired(ha, "binary_sensor.test_motion_detected", when)
+    await prime(session_factory, "test")
 
     outcome = (
         await reconciler(session_factory, settings, cameras_of(test=camera()), ha).reconcile_once()
@@ -187,6 +212,7 @@ async def test_several_missed_triggers_are_counted_separately(session_factory, s
         base + timedelta(minutes=5),
         base + timedelta(minutes=8),
     )
+    await prime(session_factory, "test")
 
     await reconciler(session_factory, settings, cameras_of(test=camera()), ha).reconcile_once()
 
@@ -199,6 +225,7 @@ async def test_a_quiet_camera_produces_no_gap(session_factory, settings) -> None
     """A quiet house is normal and must never look like a failure."""
     ha = HistoryHA()
     ha.history["binary_sensor.test_motion_detected"] = [(now_utc() - timedelta(hours=2), "off")]
+    await prime(session_factory, "test")
 
     outcome = (
         await reconciler(session_factory, settings, cameras_of(test=camera()), ha).reconcile_once()
@@ -222,6 +249,7 @@ async def test_an_image_refresh_without_a_trigger_is_not_a_gap(session_factory, 
     ha.history["image.test_event_image"] = [
         (now_utc() - timedelta(minutes=10), "2026-09-09T16:03:39+00:00")
     ]
+    await prime(session_factory, "test")
 
     await reconciler(session_factory, settings, cameras_of(test=camera()), ha).reconcile_once()
     assert await open_gaps(session_factory) == []
@@ -231,6 +259,7 @@ async def test_a_recent_trigger_is_not_yet_declared_missing(session_factory, set
     """A delivery still waiting out the freshness gate has not been lost."""
     ha = HistoryHA()
     fired(ha, "binary_sensor.test_motion_detected", now_utc() - timedelta(seconds=5))
+    await prime(session_factory, "test")
 
     outcome = (
         await reconciler(session_factory, settings, cameras_of(test=camera()), ha).reconcile_once()
@@ -244,6 +273,7 @@ async def test_repeated_passes_do_not_duplicate_a_gap(session_factory, settings)
     """The lookback deliberately overlaps, so the same trigger is seen often."""
     ha = HistoryHA()
     fired(ha, "binary_sensor.test_motion_detected", now_utc() - timedelta(minutes=10))
+    await prime(session_factory, "test")
     rec = reconciler(session_factory, settings, cameras_of(test=camera()), ha)
 
     for _ in range(4):
@@ -257,6 +287,7 @@ async def test_a_late_delivery_resolves_a_recorded_gap(session_factory, settings
     ha = HistoryHA()
     when = now_utc() - timedelta(minutes=10)
     fired(ha, "binary_sensor.test_motion_detected", when)
+    await prime(session_factory, "test")
     rec = reconciler(session_factory, settings, cameras_of(test=camera()), ha)
 
     await rec.reconcile_once()
@@ -280,6 +311,7 @@ async def test_cameras_are_reconciled_independently(session_factory, settings) -
     fired(ha, "binary_sensor.alpha_motion_detected", when)
     fired(ha, "binary_sensor.beta_motion_detected", when)
     await deliver(session_factory, "alpha", "image.alpha_event_image", when)
+    await prime(session_factory, "alpha", "beta")
 
     cams = cameras_of(
         alpha=camera("alpha", "binary_sensor.alpha_motion_detected"),
@@ -349,6 +381,7 @@ async def test_quiet_camera_is_healthy_not_unknown(session_factory, settings) ->
     ha = HistoryHA()
     ha.history["binary_sensor.test_motion_detected"] = [(now_utc() - timedelta(hours=1), "off")]
     cams = cameras_of(test=camera())
+    await prime(session_factory, "test")
     await reconciler(session_factory, settings, cams, ha).reconcile_once()
 
     async with session_scope(session_factory) as session:
@@ -365,6 +398,7 @@ async def test_a_confirmed_delivery_is_actively_verified(session_factory, settin
     fired(ha, "binary_sensor.test_motion_detected", when)
     await deliver(session_factory, "test", "image.test_event_image", when)
     cams = cameras_of(test=camera())
+    await prime(session_factory, "test")
     await reconciler(session_factory, settings, cams, ha).reconcile_once()
 
     async with session_scope(session_factory) as session:
@@ -379,6 +413,7 @@ async def test_a_missing_delivery_degrades_the_pipeline(session_factory, setting
     ha = HistoryHA()
     fired(ha, "binary_sensor.test_motion_detected", now_utc() - timedelta(minutes=10))
     cams = cameras_of(test=camera())
+    await prime(session_factory, "test")
     await reconciler(session_factory, settings, cams, ha).reconcile_once()
 
     async with session_scope(session_factory) as session:
@@ -404,6 +439,7 @@ async def test_pipeline_coverage_is_true_for_a_quiet_checked_interval(
     ha = HistoryHA()
     ha.history["binary_sensor.test_motion_detected"] = [(now_utc() - timedelta(hours=1), "off")]
     cams = cameras_of(test=camera())
+    await prime(session_factory, "test")
     await reconciler(session_factory, settings, cams, ha).reconcile_once()
 
     async with session_scope(session_factory) as session:
@@ -423,6 +459,7 @@ async def test_pipeline_coverage_is_false_when_a_delivery_is_missing(
     when = now_utc() - timedelta(minutes=10)
     fired(ha, "binary_sensor.test_motion_detected", when)
     cams = cameras_of(test=camera())
+    await prime(session_factory, "test")
     await reconciler(session_factory, settings, cams, ha).reconcile_once()
 
     async with session_scope(session_factory) as session:
@@ -440,6 +477,7 @@ async def test_pipeline_coverage_before_tracking_is_unknown(session_factory, set
     ha = HistoryHA()
     ha.history["binary_sensor.test_motion_detected"] = [(now_utc() - timedelta(hours=1), "off")]
     cams = cameras_of(test=camera())
+    await prime(session_factory, "test")
     await reconciler(session_factory, settings, cams, ha).reconcile_once()
 
     async with session_scope(session_factory) as session:
@@ -458,6 +496,7 @@ async def test_zone_pipeline_coverage_reports_the_failing_camera(
 ) -> None:
     ha = HistoryHA()
     when = now_utc() - timedelta(minutes=10)
+    await prime(session_factory, "alpha", "beta")
     for key in ("alpha", "beta"):
         fired(ha, f"binary_sensor.{key}_motion_detected", when)
         if key != missing_for:
@@ -494,3 +533,87 @@ async def test_zone_pipeline_coverage_reports_the_failing_camera(
     # gone regardless of what the neighbouring camera managed to send.
     assert view.complete is False
     assert [g.camera for g in view.delivery_gaps] == [missing_for]
+
+
+# --------------------------------------------------------------------------- #
+# The observation boundary: never accuse the past
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_first_pass_accuses_nobody(session_factory, settings) -> None:
+    """A trigger entity's history exists whether or not anything listened to it.
+
+    This is the defect that shipped: reaching back over an hour of recorder
+    history on first run produced six confident, entirely false reports of lost
+    events. The garage automations had been created at 2026-09-08 23:30 and
+    2026-09-09 00:33; every "loss" before those instants was a camera firing at
+    nobody, with no delivery ever owed.
+    """
+    ha = HistoryHA()
+    fired(
+        ha,
+        "binary_sensor.test_motion_detected",
+        now_utc() - timedelta(minutes=40),
+        now_utc() - timedelta(minutes=30),
+    )
+
+    outcome = (
+        await reconciler(session_factory, settings, cameras_of(test=camera()), ha).reconcile_once()
+    )[0]
+
+    assert outcome.missing == 0
+    assert await open_gaps(session_factory) == []
+
+
+async def test_the_first_pass_still_establishes_the_boundary(session_factory, settings) -> None:
+    ha = HistoryHA()
+    ha.history["binary_sensor.test_motion_detected"] = [(now_utc() - timedelta(hours=1), "off")]
+
+    await reconciler(session_factory, settings, cameras_of(test=camera()), ha).reconcile_once()
+
+    async with session_scope(session_factory) as session:
+        state = await DeliveryGapRepository(session).get_state("test")
+    assert state is not None
+    # The boundary is when we started watching, NOT the start of the lookback:
+    # we cannot know what existed before we were there.
+    assert (now_utc() - state.first_checked_at).total_seconds() < 60
+
+
+async def test_triggers_before_the_boundary_are_never_reported(session_factory, settings) -> None:
+    """An automation created after a trigger owed no delivery for it."""
+    ha = HistoryHA()
+    await prime(session_factory, "test", since_minutes=20)
+    fired(
+        ha,
+        "binary_sensor.test_motion_detected",
+        now_utc() - timedelta(minutes=45),  # before we were watching
+        now_utc() - timedelta(minutes=10),  # after: genuinely owed
+    )
+
+    outcome = (
+        await reconciler(session_factory, settings, cameras_of(test=camera()), ha).reconcile_once()
+    )[0]
+
+    assert outcome.missing == 1, "only the trigger after the boundary counts"
+    gaps = await open_gaps(session_factory)
+    assert len(gaps) == 1
+    assert (now_utc() - gaps[0].ha_trigger_at).total_seconds() < 20 * 60
+
+
+async def test_widening_the_lookback_cannot_manufacture_history(session_factory, settings) -> None:
+    """The exact mistake that produced the false report.
+
+    A deliberately widened lookback must still refuse to claim knowledge of a
+    period before reconciliation began.
+    """
+    ha = HistoryHA()
+    await prime(session_factory, "test", since_minutes=30)
+    fired(ha, "binary_sensor.test_motion_detected", now_utc() - timedelta(hours=10))
+    settings.delivery_reconciliation_lookback_seconds = 14 * 3600
+
+    outcome = (
+        await reconciler(session_factory, settings, cameras_of(test=camera()), ha).reconcile_once()
+    )[0]
+
+    assert outcome.missing == 0
+    assert await open_gaps(session_factory) == []

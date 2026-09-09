@@ -67,6 +67,32 @@ the morning incident is reported as three distinct garage_right losses plus one
 garage_left, not as "something went wrong". That precision is only available
 within the recorder's own retention; beyond it, nothing is knowable.
 
+## The observation boundary
+
+Reconciliation only reports triggers **at or after its own first pass** for that
+camera. The first pass establishes the boundary and accuses nobody.
+
+This is not caution for its own sake. A trigger entity's recorder history exists
+whether or not an automation was ever listening to it, so a trigger that
+predates the automation was never owed a delivery. The first version of this
+code reached back across a whole lookback window on startup and produced **six
+confident, entirely false reports of lost events** — the garage automations had
+been created at 2026-09-08 23:30 and 2026-09-09 00:33, and every "loss" before
+those instants was a camera firing at nobody.
+
+Worse, the false pattern was persuasive: it looked like a camera-specific defect,
+because the front door's automation happened to be twenty-two hours older than
+the garage ones and so had a clean record over the same period.
+
+The rule is therefore the same as camera health's: **we can only claim knowledge
+from when we began observing.** A widened lookback cannot manufacture history.
+
+One consequence worth knowing: if an automation is later disabled or deleted,
+its triggers will be reported as delivery gaps. That is arguably correct — the
+event genuinely was not delivered — but it is a configuration change rather than
+a fault, and reads identically. Deleting the camera from `cameras.yaml`, or
+clearing its `trigger_entity`, stops reconciliation for it.
+
 ## Detection only — no backfill
 
 `image_proxy` serves only the *current* bytes. Three missed events left one

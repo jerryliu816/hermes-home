@@ -155,6 +155,9 @@ class DeliveryReconciler:
 
     async def _reconcile_camera(self, camera_key: str, trigger_entity: str) -> ReconcileOutcome:
         moment = now_utc()
+        async with session_scope(self._session_factory) as session:
+            known = await DeliveryGapRepository(session).get_state(camera_key)
+            boundary = ensure_utc(known.first_checked_at) if known else None
         # Triggers newer than the settle window are still legitimately in
         # flight: a delivery waits out the freshness gate and vision before it
         # is finished. Declaring those missing would report every recent event
@@ -166,6 +169,23 @@ class DeliveryReconciler:
 
         history = await self._ha.get_state_history(trigger_entity, start=window_start, end=moment)
         edges = [t for t in rising_edges(history) if t <= horizon]
+
+        # Never reach back before reconciliation started watching this camera.
+        #
+        # A trigger entity's history exists whether or not an automation was
+        # listening to it, so a trigger that predates the automation was never
+        # owed a delivery. Reaching back produced six confident and entirely
+        # false accusations of lost events: the garage automations were created
+        # at 2026-09-08 23:30 and 2026-09-09 00:33, and every "loss" before
+        # those instants was simply a camera firing at nobody.
+        #
+        # Same rule as camera health, for the same reason: we can only claim
+        # knowledge from when we began observing. Earlier is unknown -- never
+        # clean, and never faulty.
+        if boundary is None:
+            edges = []  # first pass establishes the boundary and accuses nobody
+        else:
+            edges = [t for t in edges if t >= boundary]
 
         slack = timedelta(seconds=self._settings.delivery_match_window_seconds)
         matched = missing = new_gaps = resolved = 0
@@ -221,9 +241,10 @@ class DeliveryReconciler:
             await repo.mark_checked(
                 camera_key=camera_key,
                 checked_at=moment,
-                # The recorder query covered the whole lookback, so the first
-                # pass genuinely verifies that span rather than only "now".
-                checked_from=window_start,
+                # The first pass establishes the boundary at the moment it ran,
+                # not at the start of its lookback: we cannot know whether an
+                # automation existed before we were watching.
+                checked_from=moment,
                 checked_through=horizon,
                 last_verified_delivery_at=last_verified,
             )
