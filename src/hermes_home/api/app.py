@@ -31,8 +31,10 @@ from hermes_home.spatial import seed_home
 from hermes_home.storage.engine import (
     create_engine,
     create_session_factory,
+    create_verification_engine,
     current_revision,
     head_revision,
+    quick_check,
     session_scope,
 )
 from hermes_home.vision.registry import build_provider
@@ -47,6 +49,7 @@ async def build_state(settings: Settings, *, start_worker: bool = True) -> AppSt
 
     engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)
+    verify_engine = create_verification_engine(settings.database_url)
 
     # Refuse to serve against a schema this code was not written for. Starting
     # anyway means writing rows a later upgrade cannot interpret, and a loud
@@ -76,8 +79,17 @@ async def build_state(settings: Settings, *, start_worker: bool = True) -> AppSt
             timeout_seconds=settings.home_assistant_timeout_seconds,
         ),
         vision=build_provider(settings),
+        verify_engine=verify_engine,
         expected_revision=expected,
     )
+
+    # Structural sanity, reported and never repaired. A corrupt database is a
+    # situation for a human and a backup; repairing automatically would destroy
+    # the evidence of what went wrong.
+    state.integrity_ok, state.integrity_detail = await quick_check(engine)
+    if not state.integrity_ok:
+        logger.error("database.quick_check_failed", detail=state.integrity_detail)
+    
 
     if start_worker:
         state.worker = IngestWorker(
@@ -146,6 +158,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if state.worker is not None:
                 await state.worker.stop()
             await state.ha_client.aclose()
+            if state.verify_engine is not None:
+                await state.verify_engine.dispose()
             await state.engine.dispose()
 
     app = FastAPI(

@@ -44,6 +44,10 @@ async def health(state: Annotated[AppState, Depends(get_state)]) -> dict[str, An
         "time": now_utc().isoformat(),
         "version": "0.1.0",
         "database": "ok" if database_ok else "error",
+        # Reported here but deliberately not allowed to fail liveness: the
+        # container healthcheck reads this, and restarting a process because
+        # its database is corrupt would just corrupt it in a loop.
+        "integrity": state.integrity_detail,
         "vision_provider": state.settings.vision_provider,
         "vision_model": (
             state.settings.vision_model if state.settings.vision_provider != "mock" else None
@@ -66,6 +70,12 @@ async def ready(
             await session.execute(text("SELECT 1"))
             revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
         checks["database"] = {"ok": True}
+        # Structural check from startup. Reported, never repaired.
+        checks["integrity"] = {
+            "ok": state.integrity_ok,
+            "detail": state.integrity_detail,
+            "checked": "startup",
+        }
         checks["migrations"] = {
             "ok": revision == state.expected_revision or state.expected_revision is None,
             "current": revision,
@@ -73,6 +83,7 @@ async def ready(
         }
     except Exception as exc:
         checks["database"] = {"ok": False, "error": type(exc).__name__}
+        checks["integrity"] = {"ok": False, "detail": "database unreachable"}
         checks["migrations"] = {"ok": False, "current": None, "expected": state.expected_revision}
 
     # The worker is what drains the durable inbox; without it events queue forever.

@@ -596,3 +596,30 @@ async def test_frame_slightly_predating_the_trigger_is_tolerated(
 
     async with session_scope(session_factory) as session:
         assert await session.scalar(select(func.count()).select_from(Event)) == 1
+
+
+async def test_pragmas_are_what_durability_depends_on(settings) -> None:
+    """These are load-bearing, not decoration.
+
+    WAL lets the worker write while MCP reads. foreign_keys makes every
+    ondelete=CASCADE real rather than advisory. synchronous=FULL fsyncs the WAL
+    on each commit instead of only at checkpoints -- measured here at ~0.06ms
+    per commit, which for a handful of events a day is not worth trading for a
+    weaker guarantee.
+    """
+    from sqlalchemy import text
+
+    from hermes_home.storage.engine import create_engine
+
+    engine = create_engine(settings.database_url)
+    try:
+        async with engine.connect() as conn:
+            journal = await conn.scalar(text("PRAGMA journal_mode"))
+            sync = await conn.scalar(text("PRAGMA synchronous"))
+            fk = await conn.scalar(text("PRAGMA foreign_keys"))
+    finally:
+        await engine.dispose()
+
+    assert str(journal).lower() == "wal"
+    assert sync == 2, "synchronous must be FULL (2), not NORMAL (1)"
+    assert fk == 1

@@ -19,7 +19,7 @@ from hermes_home.core.time import now_utc
 from hermes_home.health.monitor import CameraHealthMonitor
 from hermes_home.health.reconcile import DeliveryReconciler
 from hermes_home.ingest.worker import IngestWorker
-from hermes_home.storage.engine import head_revision, session_scope
+from hermes_home.storage.engine import create_verification_engine, head_revision, session_scope
 from hermes_home.storage.repositories import DeliveryRepository
 from hermes_home.vision.mock import MockVisionProvider
 
@@ -31,7 +31,8 @@ async def client(session_factory, settings, home_config, cameras_config, fake_ha
         settings=settings,
         home=home_config,
         cameras=cameras_config,
-        engine=None,
+        engine=create_verification_engine(settings.database_url),
+        verify_engine=create_verification_engine(settings.database_url),
         session_factory=session_factory,
         ha_client=fake_ha,
         vision=MockVisionProvider(),
@@ -288,3 +289,80 @@ def test_head_revision_is_resolvable_from_the_working_directory() -> None:
 
     revision = head_revision(str(S(_env_file=None).alembic_ini))
     assert revision, "head revision must resolve, or the startup guard is inert"
+
+
+# --------------------------------------------------------------------------- #
+# Startup integrity check
+# --------------------------------------------------------------------------- #
+
+
+async def test_quick_check_passes_on_a_healthy_database(settings) -> None:
+    from hermes_home.storage.engine import create_engine, quick_check
+
+    engine = create_engine(settings.database_url)
+    try:
+        ok, detail = await quick_check(engine)
+    finally:
+        await engine.dispose()
+    assert ok is True
+    assert detail == "ok"
+
+
+async def test_quick_check_reports_rather_than_raises_on_a_broken_file(tmp_path) -> None:
+    """Corruption is a situation for a human and a backup.
+
+    Nothing here repairs, rebuilds or deletes: an automatic repair would
+    destroy the evidence of what went wrong, which is the only thing that makes
+    the next occurrence diagnosable.
+    """
+    from hermes_home.storage.engine import create_engine, quick_check
+
+    broken = tmp_path / "broken.db"
+    broken.write_bytes(b"SQLite format 3\x00" + b"\xde\xad\xbe\xef" * 512)
+    engine = create_engine(f"sqlite+aiosqlite:///{broken}")
+    try:
+        ok, detail = await quick_check(engine)
+    finally:
+        await engine.dispose()
+
+    assert ok is False
+    assert detail  # says something about what is wrong
+    assert broken.exists(), "the damaged file must be left exactly as found"
+
+
+async def test_ready_reports_integrity(client) -> None:
+    http, _ = client
+    body = (await http.get("/ready")).json()
+    assert body["checks"]["integrity"]["ok"] is True
+    assert body["checks"]["integrity"]["detail"] == "ok"
+
+
+async def test_a_failed_integrity_check_makes_the_service_unready(client) -> None:
+    http, state = client
+    state.integrity_ok = False
+    state.integrity_detail = "*** in database main *** Page 4 is never used"
+    try:
+        response = await http.get("/ready")
+    finally:
+        state.integrity_ok, state.integrity_detail = True, "ok"
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["integrity"]["ok"] is False
+
+
+async def test_liveness_never_fails_on_integrity(client) -> None:
+    """The container healthcheck reads /health.
+
+    Restarting a process because its database is corrupt would only corrupt it
+    in a loop, so integrity is reported there and never allowed to fail it.
+    """
+    http, state = client
+    state.integrity_ok = False
+    state.integrity_detail = "malformed"
+    try:
+        response = await http.get("/health")
+    finally:
+        state.integrity_ok, state.integrity_detail = True, "ok"
+
+    assert response.status_code == 200
+    assert response.json()["integrity"] == "malformed"

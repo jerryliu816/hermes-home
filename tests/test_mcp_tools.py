@@ -14,7 +14,7 @@ from sqlalchemy import select
 from hermes_home.api.deps import AppState
 from hermes_home.core.ids import new_uid
 from hermes_home.core.time import now_utc
-from hermes_home.storage.engine import session_scope
+from hermes_home.storage.engine import create_verification_engine, session_scope
 from hermes_home.storage.models import Event
 from hermes_home.vision.mock import MockVisionProvider
 
@@ -36,7 +36,8 @@ def app_state(session_factory, settings, home_config, cameras_config, fake_ha) -
         settings=settings,
         home=home_config,
         cameras=cameras_config,
-        engine=None,
+        engine=create_verification_engine(settings.database_url),
+        verify_engine=create_verification_engine(settings.database_url),
         session_factory=session_factory,
         ha_client=fake_ha,
         vision=MockVisionProvider(),

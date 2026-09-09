@@ -24,7 +24,7 @@ from hermes_home.core.ids import delivery_key as compute_delivery_key
 from hermes_home.core.ids import new_uid
 from hermes_home.core.time import now_utc, parse_ha_timestamp
 from hermes_home.domain.event_types import is_known, known_event_types
-from hermes_home.storage.engine import session_scope
+from hermes_home.storage.engine import confirm_delivery_durable, session_scope
 from hermes_home.storage.repositories import DeliveryRepository
 
 logger = structlog.get_logger(__name__)
@@ -124,6 +124,35 @@ async def receive_home_assistant_event(
             received_at=received_at,
         )
         delivery_uid = delivery.uid
+
+    # A commit that returns success is not proof the row exists. On 2026-09-09
+    # four deliveries were committed without error, acknowledged to Home
+    # Assistant with 202, and then simply were not there -- and because we had
+    # already promised success, Home Assistant had no way to know the events
+    # were gone. It logged nothing, retried nothing, and the history acquired a
+    # hole shaped exactly like a quiet morning.
+    #
+    # So the promise is verified before it is made, through a connection that
+    # did not perform the write: a row is always visible to its own writer, so
+    # only a fresh connection can attest that it is really there.
+    #
+    # No retry. If the database cannot confirm a write it just accepted, the
+    # honest move is to fail loudly and let Home Assistant surface it -- its
+    # rest_command logs a warning on any non-2xx, which is exactly the signal
+    # that was missing.
+    verify_engine = state.verify_engine or state.engine
+    if not await confirm_delivery_durable(verify_engine, delivery_uid):
+        log.error(
+            "webhook.durability_unconfirmed",
+            delivery_uid=delivery_uid,
+            event_type=payload.event_type,
+            camera=payload.camera,
+            detail="commit reported success but the row was not visible to a fresh connection",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="delivery could not be confirmed durable; not accepted",
+        )
 
     log.info(
         "webhook.accepted",

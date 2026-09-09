@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from hermes_home.api.app import create_app
 from hermes_home.api.deps import AppState
 from hermes_home.core.time import now_utc
-from hermes_home.storage.engine import session_scope
+from hermes_home.storage.engine import create_verification_engine, session_scope
 from hermes_home.storage.models import Event, EventDelivery
 from hermes_home.vision.mock import MockVisionProvider
 
@@ -21,19 +21,28 @@ PATH = "/api/v1/events/home-assistant"
 async def client(session_factory, settings, home_config, cameras_config, fake_ha):
     """The real app, with the worker left stopped so tests drive it explicitly."""
     app = create_app(settings)
-    app.state.app_state = AppState(
+    state = AppState(
         settings=settings,
         home=home_config,
         cameras=cameras_config,
-        engine=None,
+        engine=create_verification_engine(settings.database_url),
+        verify_engine=create_verification_engine(settings.database_url),
         session_factory=session_factory,
         ha_client=fake_ha,
         vision=MockVisionProvider(),
         worker=None,
     )
+    app.state.app_state = state
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as http:
+        http.hermes_state = state
         yield http
+
+
+@pytest.fixture
+def app_state(client):
+    """The live AppState behind `client`, for tests that break it on purpose."""
+    return client.hermes_state
 
 
 def _payload(**overrides) -> dict:
@@ -177,3 +186,115 @@ async def test_full_path_webhook_to_stored_event(
         assert event.event_type == "camera.person_detected"
         assert event.zone_id is not None
         assert event.occurred_at.tzinfo is not None
+
+
+# --------------------------------------------------------------------------- #
+# Durability: a 202 is a promise, and it is verified before it is made
+# --------------------------------------------------------------------------- #
+
+
+async def test_202_means_a_fresh_connection_can_see_the_row(
+    client, session_factory, settings
+) -> None:
+    """The response is only as good as what an uninvolved reader can see.
+
+    A row is always visible to the connection that wrote it, so the writer's
+    own success proves nothing. This opens a brand-new connection -- separate
+    file handle, separate view of the WAL index -- and requires the row to be
+    there.
+    """
+    from sqlalchemy import text
+
+    from hermes_home.storage.engine import create_verification_engine
+
+    response = await client.post(PATH, json=_payload(), headers={HEADER: "test-secret"})
+    assert response.status_code == 202
+    uid = response.json()["delivery_uid"]
+
+    engine = create_verification_engine(settings.database_url)
+    try:
+        async with engine.connect() as conn:
+            found = await conn.scalar(
+                text("SELECT 1 FROM event_deliveries WHERE uid = :uid"), {"uid": uid}
+            )
+    finally:
+        await engine.dispose()
+    assert found is not None, "202 was returned for a row no other connection can see"
+
+
+async def test_a_commit_that_does_not_persist_is_refused_not_accepted(client, app_state) -> None:
+    """The 2026-09-09 failure, reproduced.
+
+    Commits reported success while rows never became visible. Home Assistant
+    was told 202, so it logged nothing and retried nothing, and four events
+    vanished silently. Here the write is made to disappear the same way; the
+    webhook must refuse rather than promise.
+    """
+    from hermes_home.storage.engine import create_verification_engine
+
+    class BlindEngine:
+        """A database in which nothing committed can ever be found again."""
+
+        def connect(self):
+            raise RuntimeError("database disk image is malformed")
+
+    app_state.verify_engine = BlindEngine()
+    try:
+        response = await client.post(PATH, json=_payload(), headers={HEADER: "test-secret"})
+    finally:
+        app_state.verify_engine = create_verification_engine(app_state.settings.database_url)
+
+    assert response.status_code == 503
+    # Home Assistant's rest_command logs a warning on any non-2xx, which is
+    # precisely the signal that was missing when this really happened.
+    assert "durable" in response.json()["detail"]
+
+
+async def test_a_missing_row_is_refused_even_without_an_error(client, app_state) -> None:
+    """The subtler shape: no exception, the row simply is not there."""
+    from hermes_home.storage.engine import create_verification_engine
+
+    class EmptyResult:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def scalar(self, *a, **k):
+            return None
+
+    class AmnesiacEngine:
+        def connect(self):
+            return EmptyResult()
+
+    app_state.verify_engine = AmnesiacEngine()
+    try:
+        response = await client.post(PATH, json=_payload(), headers={HEADER: "test-secret"})
+    finally:
+        app_state.verify_engine = create_verification_engine(app_state.settings.database_url)
+
+    assert response.status_code == 503
+
+
+async def test_a_refused_delivery_is_never_logged_as_accepted(client, app_state, capsys) -> None:
+    """`webhook.accepted` is a durability claim and must not appear otherwise.
+
+    Anyone reading the log for that line is entitled to believe the delivery
+    exists.
+    """
+    from hermes_home.storage.engine import create_verification_engine
+
+    class BlindEngine:
+        def connect(self):
+            raise RuntimeError("no")
+
+    app_state.verify_engine = BlindEngine()
+    try:
+        await client.post(PATH, json=_payload(), headers={HEADER: "test-secret"})
+    finally:
+        app_state.verify_engine = create_verification_engine(app_state.settings.database_url)
+
+    logged = capsys.readouterr().out
+    assert "webhook.accepted" not in logged
+    assert "webhook.durability_unconfirmed" in logged

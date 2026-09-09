@@ -18,7 +18,7 @@ from hermes_home.core.ids import delivery_key
 from hermes_home.core.time import now_utc
 from hermes_home.ingest.worker import IngestWorker
 from hermes_home.spatial import cameras_observing, resolve_zone_id
-from hermes_home.storage.engine import session_scope
+from hermes_home.storage.engine import create_verification_engine, session_scope
 from hermes_home.storage.models import Event, Incident, Zone
 from hermes_home.storage.repositories import DeliveryRepository
 from hermes_home.vision.mock import MockVisionProvider
@@ -320,7 +320,8 @@ async def mcp_server(session_factory, settings, home_config, cameras_config, fak
             settings=settings,
             home=home_config,
             cameras=cameras_config,
-            engine=None,
+            engine=create_verification_engine(settings.database_url),
+            verify_engine=create_verification_engine(settings.database_url),
             session_factory=session_factory,
             ha_client=fake_ha,
             vision=MockVisionProvider(),

@@ -40,6 +40,13 @@ class AppState:
     #: Alembic revision the running code expects; readiness compares the
     #: database against it so a half-applied upgrade is visible rather than
     #: silently serving against the wrong schema.
+    #: Pool-less engine used to re-read a just-committed delivery through a
+    #: connection that did not write it. Optional so tests can construct state
+    #: without one; the webhook falls back to the main engine and says so.
+    verify_engine: AsyncEngine | None = None
+    #: Result of PRAGMA quick_check at startup. Reported, never acted on.
+    integrity_ok: bool = True
+    integrity_detail: str = "ok"
     expected_revision: str | None = None
     mcp_mounted: bool = False
 

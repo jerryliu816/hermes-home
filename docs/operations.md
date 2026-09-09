@@ -208,6 +208,55 @@ $ make logs | grep incidents.closed
   incidents.closed  count=9 idle_seconds=120
 ```
 
+## Durability of a 202
+
+A `202` from the webhook is a promise that the delivery exists. Before making
+it, the handler re-reads the row through a **fresh connection that did not
+perform the write** — a row is always visible to its own writer, so only an
+uninvolved reader can attest that it is really there. If that read fails or
+comes back empty, the webhook returns **503** and logs
+`webhook.durability_unconfirmed`; `webhook.accepted` is never written.
+
+That matters because Home Assistant's `rest_command` logs a warning on any
+non-2xx but nothing at all on success. On 2026-09-09 four deliveries were
+committed without error, acknowledged with 202, and then were simply not there
+— and because we had already promised success, Home Assistant had no reason to
+complain.
+
+There is no retry. If the database cannot confirm a write it just accepted, the
+honest move is to fail loudly rather than guess.
+
+```console
+$ make logs | grep durability_unconfirmed
+```
+
+### What fsync actually guarantees here
+
+`synchronous=FULL` is set, so SQLite fsyncs the WAL on every commit rather than
+only at checkpoints. Measured cost on this deployment: **~0.06ms per commit**.
+
+But be clear about the limit. Measured on this machine, `FULL` costs **1.3x**
+`OFF` on the `./data` bind mount and **92.7x** `OFF` on the container's own
+filesystem. The macOS virtiofs layer acknowledges syncs without durably
+flushing to the host disk, so `FULL` does not make power-loss durability real
+here — it is set because it is correct, free, and right if the storage ever
+changes.
+
+The guarantee this system actually enforces is the one it can verify:
+cross-connection visibility, checked per delivery.
+
+## Integrity
+
+`PRAGMA quick_check` runs at startup. The result appears in `/health` as
+`integrity` and in `/ready` as a check; a failure makes the service **unready**
+but never fails liveness, because restarting a process over a corrupt database
+just corrupts it in a loop.
+
+Nothing is repaired automatically. A corrupt database is a situation for a human
+and a backup — an automatic rebuild would destroy the evidence of what went
+wrong, which is the only thing that makes a recurrence diagnosable. Restore from
+`make backup` output; see below.
+
 ## Where data lives
 
 | Path | Contents | Survives container removal |
