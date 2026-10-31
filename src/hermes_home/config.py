@@ -294,6 +294,20 @@ class CameraConfig(BaseModel):
     #: unwatched zone quiet, one level subtler. Must name zones the camera
     #: actually covers (its location, or something it observes).
     partial_coverage: list[str] = Field(default_factory=list)
+    #: Extra instruction appended to the base vision prompt for this camera only.
+    #:
+    #: Some cameras are not watching for intruders. One here points inside a
+    #: reptile enclosure, where "an animal is present" is the normal state rather
+    #: than something to escalate, and the useful description is behavioral. The
+    #: base prompt cannot know that, and hardcoding a camera key in the prompt
+    #: layer would make every future exception a code change.
+    #:
+    #: It steers emphasis -- what scene_summary, activity, notable_attributes and
+    #: tags should dwell on. It cannot relax the rules that make an observation
+    #: trustworthy: null handling, confidence, the tag vocabulary, and the ban on
+    #: guessing are re-asserted after it (see vision/prompts.py), so a context
+    #: that tries to loosen them loses.
+    vision_context: str | None = None
 
     @field_validator("event_image_strategy")
     @classmethod

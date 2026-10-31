@@ -47,6 +47,9 @@ home:
     cottage:
       name: Cottage
       kind: structure
+    workshop:
+      name: Workshop
+      kind: interior
 
   # Adjacency is recorded now and deliberately not traversed in v1.
   # A future correlator can use it without a migration.

@@ -28,7 +28,11 @@ from hermes_home.vision.base import (
     VisionResult,
     VisionStatus,
 )
-from hermes_home.vision.prompts import PROMPT_VERSION, SYSTEM_PROMPT, build_user_prompt
+from hermes_home.vision.prompts import (
+    PROMPT_VERSION,
+    build_system_prompt,
+    build_user_prompt,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -71,7 +75,17 @@ class AnthropicVisionProvider:
             response = await self._client.messages.parse(
                 model=self._model,
                 max_tokens=2048,
-                system=SYSTEM_PROMPT,
+                # A list block rather than a bare string so the base prompt can
+                # carry cache_control: it is identical across every event from a
+                # given camera, and re-billing ~1.5kB of unchanging instructions
+                # on each doorbell press is pure waste.
+                system=[
+                    {
+                        "type": "text",
+                        "text": build_system_prompt(request.context),
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 output_format=SceneObservation,
                 output_config={"effort": "low"},
                 timeout=request.timeout_seconds,

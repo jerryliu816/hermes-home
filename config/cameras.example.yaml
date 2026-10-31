@@ -30,6 +30,16 @@
 #                       Verified behavior for Eufy; confirm for other brands.
 #   camera_snapshot     No freshness signal — take a snapshot from camera.* directly.
 #   none                Metadata-only event; no image is fetched or analyzed.
+#
+# vision_context (optional):
+#   Free text appended to the base vision prompt for THIS camera only. Use it
+#   when a camera is not watching for the thing the base prompt assumes -- one
+#   pointed into a pet enclosure, a workshop, a driveway gate. It steers what
+#   the description dwells on (scene_summary, activity, notable_attributes,
+#   tags). It cannot loosen the rules that make an observation trustworthy:
+#   null-for-unknown, confidence, the fixed tag vocabulary, the privacy limits
+#   and the ban on guessing are restated after it and win. A camera with no
+#   vision_context gets exactly the prompt it got before this option existed.
 cameras:
   front_door:
     name: Front Door
@@ -93,6 +103,30 @@ cameras:
     trigger_entity: binary_sensor.right_walkway_motion_detected
     location: right_walkway
     observes: []
+
+  workshop:
+    name: Workshop
+    # An indoor camera whose job is not intrusion detection. Without a
+    # vision_context the base prompt reads every frame as security footage, so
+    # routine occupancy comes back described as an event.
+    camera_entity: camera.workshop
+    event_image_entity: image.workshop_event_image
+    event_image_strategy: image_entity_state
+    trigger_entity: binary_sensor.workshop_motion_detected
+    location: workshop
+    observes:
+      - workshop
+    vision_context: >
+      This camera is indoors and points at the workbench. Describe it as
+      workspace activity, not as security footage.
+
+      Focus on:
+      - whether anyone is at the bench
+      - what kind of work appears to be underway
+      - whether tools or machines are left running
+      - whether the space is tidy or mid-project
+
+      A person present here is expected and is not an intrusion.
 
   backyard:
     name: Backyard

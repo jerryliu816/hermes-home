@@ -44,6 +44,9 @@ home:
     garage_entry:
       name: Garage Entry
       kind: threshold
+    gecko_enclosure:
+      name: Gecko Enclosure
+      kind: interior
     left_walkway:
       name: Left Walkway
       kind: exterior
@@ -142,6 +145,9 @@ home:
     garage_entry:
       name: Garage Entry
       kind: threshold
+    gecko_enclosure:
+      name: Gecko Enclosure
+      kind: interior
     left_walkway:
       name: Left Walkway
       kind: exterior

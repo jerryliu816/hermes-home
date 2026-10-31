@@ -1,4 +1,4 @@
-# Test fixture: the same seven cameras as the real deployment.
+# Test fixture: the same eight cameras as the real deployment.
 # See tests/fixtures/home.yaml for why this is a copy rather than a symlink.
 # Front Door — real entity IDs, verified against Home Assistant.
 #
@@ -29,6 +29,38 @@ cameras:
     observes:
       - front_porch
       - front_walkway
+
+  gecko:
+    name: Gecko
+    # Indoors, pointed into a reptile enclosure. Carries a vision_context so the
+    # prompt describes gecko behavior rather than reading a visible animal as an
+    # intrusion. Present in the fixture because per-camera context must be
+    # exercised on the same pipeline every other camera uses.
+    camera_entity: camera.gecko
+    event_image_entity: image.gecko_event_image
+    event_image_strategy: image_entity_state
+    trigger_entity: binary_sensor.gecko_motion_detected
+    location: gecko_enclosure
+    observes:
+      - gecko_enclosure
+    vision_context: >
+      This camera is mounted indoors and points only inside Toothless's
+      leopard gecko enclosure. Analyze the image as leopard gecko monitoring,
+      not as home security footage.
+
+      Focus on:
+      - whether Toothless is visible
+      - where Toothless is in the enclosure
+      - movement/activity
+      - resting
+      - entering or leaving a hide
+      - climbing
+      - feeding behavior
+      - drinking behavior
+      - shedding-related behavior
+      - unusual posture or activity
+
+      Do not treat a visible animal as an intrusion or security concern.
 
   garage_right:
     name: Garage Right

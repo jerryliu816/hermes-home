@@ -229,6 +229,7 @@ async def test_describe_home_flags_unobserved_zones(mcp_server) -> None:
         "front_door",
         "garage_left",
         "garage_right",
+        "gecko",
         "left_walkway",
         "right_walkway",
     }

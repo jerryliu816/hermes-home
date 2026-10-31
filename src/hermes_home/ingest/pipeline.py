@@ -189,6 +189,7 @@ async def process_delivery(
             observes=camera.observes,
             event_type=event_type,
             occurred_at=occurred_at,
+            vision_context=camera.vision_context,
         )
         results = await _analyze_with_retry(
             vision,

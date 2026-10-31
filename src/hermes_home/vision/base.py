@@ -63,6 +63,10 @@ class CameraEventContext(BaseModel):
     observes: list[str] = Field(default_factory=list)
     event_type: str
     occurred_at: datetime
+    #: This camera's ``vision_context`` from cameras.yaml, carried through
+    #: unchanged. Lives on the context rather than on the request so every
+    #: provider sees it the same way and no camera key ever reaches this layer.
+    vision_context: str | None = None
 
 
 class VisionRequest(BaseModel):

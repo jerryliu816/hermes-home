@@ -31,6 +31,7 @@ ALL_CAMERAS = {
     "front_door",
     "garage_left",
     "garage_right",
+    "gecko",
     "left_walkway",
     "right_walkway",
 }
@@ -128,6 +129,7 @@ def test_every_camera_is_configured(cameras_config) -> None:
         "front_door",
         "garage_left",
         "garage_right",
+        "gecko",
         "left_walkway",
         "right_walkway",
     }
@@ -380,6 +382,7 @@ async def test_describe_home_lists_every_camera_and_its_coverage(mcp_server) -> 
         "front_door",
         "garage_left",
         "garage_right",
+        "gecko",
         "left_walkway",
         "right_walkway",
     }

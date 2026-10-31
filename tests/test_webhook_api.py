@@ -147,6 +147,7 @@ async def test_health_reports_queue_depth(client) -> None:
         "front_door",
         "garage_left",
         "garage_right",
+        "gecko",
         "left_walkway",
         "right_walkway",
     }
