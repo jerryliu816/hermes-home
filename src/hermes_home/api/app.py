@@ -21,6 +21,7 @@ from hermes_home.config import (
     Settings,
     load_cameras_config,
     load_home_config,
+    validate_cameras_against_settings,
     validate_home_and_cameras,
 )
 from hermes_home.health.monitor import CameraHealthMonitor
@@ -47,6 +48,7 @@ async def build_state(settings: Settings, *, start_worker: bool = True) -> AppSt
     home = load_home_config(settings.config_dir)
     cameras = load_cameras_config(settings.config_dir)
     validate_home_and_cameras(home, cameras)
+    validate_cameras_against_settings(settings, cameras)
 
     engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)

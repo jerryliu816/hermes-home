@@ -127,7 +127,7 @@ async def process_delivery(
                 camera,
                 occurred_at=occurred_at,
                 last_seen_state_ts=last_seen,
-                poll_attempts=settings.freshness_poll_attempts,
+                poll_attempts=settings.freshness_attempts_for(camera),
                 poll_interval_seconds=settings.freshness_poll_interval_seconds,
                 tolerance_seconds=settings.freshness_tolerance_seconds,
             )

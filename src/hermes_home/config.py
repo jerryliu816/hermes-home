@@ -12,6 +12,7 @@ starts with no webhook secret is worse than one that refuses to start.
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -239,6 +240,21 @@ class Settings(BaseSettings):
         freshness = self.freshness_poll_attempts * self.freshness_poll_interval_seconds
         return freshness + 2 * self.vision_timeout_seconds + 2.0 + 15.0
 
+    def freshness_attempts_for(self, camera: CameraConfig) -> int:
+        """Poll attempts for one camera: its own wait when it sets one, else the global."""
+        if camera.freshness_wait_seconds is None:
+            return self.freshness_poll_attempts
+        return math.ceil(camera.freshness_wait_seconds / self.freshness_poll_interval_seconds)
+
+    def analysis_budget_seconds_for(self, cameras: CamerasConfig) -> float:
+        """:attr:`analysis_budget_seconds`, with the slowest camera's freshness wait."""
+        attempts = max(
+            (self.freshness_attempts_for(c) for c in cameras.cameras.values()),
+            default=self.freshness_poll_attempts,
+        )
+        freshness = attempts * self.freshness_poll_interval_seconds
+        return freshness + 2 * self.vision_timeout_seconds + 2.0 + 15.0
+
     def mcp_host_allowlist(self) -> list[str]:
         """Host values the MCP endpoint accepts, with and without the port."""
         names = ["localhost", "127.0.0.1"]
@@ -391,6 +407,17 @@ class CameraConfig(BaseModel):
     event_image_strategy: Literal["image_entity_state", "camera_snapshot", "none"] = (
         "image_entity_state"
     )
+    #: How long to wait for this camera's event still, overriding the global
+    #: FRESHNESS_POLL_ATTEMPTS x FRESHNESS_POLL_INTERVAL_SECONDS.
+    #:
+    #: Cameras do not all publish at the same speed. Measured on 2026-11-01:
+    #: the gecko camera's image advanced 60-62s after every one of 23 motion
+    #: triggers, so the global 15s wait rejected nearly all of them as stale --
+    #: correct frames, discarded for arriving late. Raising the global wait
+    #: instead would let any camera whose image never advances hold the single
+    #: worker that long. The lease must still cover the slowest camera; that
+    #: is checked at startup.
+    freshness_wait_seconds: float | None = Field(default=None, gt=0, le=600)
     location: str
     observes: list[str] = Field(default_factory=list)
     #: Zones this camera sees only part of. Coverage is otherwise treated as
@@ -497,3 +524,24 @@ def validate_home_and_cameras(home: HomeConfig, cameras: CamerasConfig) -> None:
                 problems.append(f"relationship references unknown zone {endpoint!r}")
     if problems:
         raise ConfigError("invalid home configuration:\n  - " + "\n  - ".join(problems))
+
+
+def validate_cameras_against_settings(settings: Settings, cameras: CamerasConfig) -> None:
+    """A per-camera freshness wait must still fit inside the ingest lease.
+
+    Only enforced when some camera sets its own wait, so a deployment that sets
+    none behaves exactly as before.
+    """
+    slow = {k: c for k, c in cameras.cameras.items() if c.freshness_wait_seconds is not None}
+    if not slow:
+        return
+    budget = settings.analysis_budget_seconds_for(cameras)
+    if settings.ingest_lease_seconds <= budget:
+        longest = max(slow, key=lambda k: settings.freshness_attempts_for(slow[k]))
+        raise ConfigError(
+            f"INGEST_LEASE_SECONDS={settings.ingest_lease_seconds} does not exceed the "
+            f"worst-case job time of {budget:.0f}s for camera {longest!r} (its "
+            "freshness_wait_seconds + 2 x VISION_TIMEOUT_SECONDS + retry delay + margin); "
+            "a slow job would be reclaimed and processed twice. Raise the lease or "
+            "shorten the wait."
+        )

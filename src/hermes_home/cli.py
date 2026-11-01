@@ -101,6 +101,7 @@ def check_config() -> None:
     from hermes_home.config import (
         load_cameras_config,
         load_home_config,
+        validate_cameras_against_settings,
         validate_home_and_cameras,
     )
 
@@ -109,6 +110,7 @@ def check_config() -> None:
     home = load_home_config(settings.config_dir)
     cameras = load_cameras_config(settings.config_dir)
     validate_home_and_cameras(home, cameras)
+    validate_cameras_against_settings(settings, cameras)
     typer.echo(
         f"configuration ok: {len(home.zones)} zones, {len(cameras.cameras)} cameras, "
         f"vision provider {settings.vision_provider}"

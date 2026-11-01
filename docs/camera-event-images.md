@@ -16,6 +16,13 @@ should be built on.
 The second publication was confirmed to belong to the same event: exactly one
 webhook was received, and no second detection fired.
 
+Not every camera is this quick. The gecko camera (indoor, same integration)
+publishes its still **60–62 seconds** after every motion trigger, measured
+across 23 triggers on 2026-11-01, so the 15s default rejected nearly every
+gecko event as stale. Such a camera sets `freshness_wait_seconds` in
+`cameras.yaml` rather than raising the global wait, which would let a camera
+whose image never advances hold the single worker for that long.
+
 Two consequences, both already handled:
 
 1. **The detection fires before the image exists.** A freshness gate that gives
