@@ -6,6 +6,7 @@ prompts depend on, so the tests assert the contract, not just that code runs.
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 import pytest
@@ -147,12 +148,49 @@ async def test_events_carry_local_time_alongside_utc(mcp_server, stored_event) -
 
 async def test_unknown_values_are_explicit_nulls(mcp_server, stored_event) -> None:
     """An omitted key reads as zero to a language model; a null does not."""
-    event = (await call(mcp_server, "home_recent_events", {"minutes": 60}))["events"][0]
-    observation = event["analysis"]["observation"]
+    brief = (await call(mcp_server, "home_recent_events", {"minutes": 60}))["events"][0]
+    assert "vehicle_count" in brief
+    assert brief["vehicle_count"] is None
+    assert brief["person_count"] == 0 or brief["person_count"] >= 1
 
+    full = (await call(mcp_server, "home_get_event", {"uid": brief["uid"]}))["event"]
+    observation = full["analysis"]["observation"]
     assert "vehicle_count" in observation
     assert observation["vehicle_count"] is None
-    assert observation["person_count"] == 0 or observation["person_count"] >= 1
+
+
+async def test_list_events_are_briefs_and_get_event_is_full(mcp_server, stored_event) -> None:
+    """A list carries what answers a question; the plumbing stays in home_get_event."""
+    brief = (await call(mcp_server, "home_recent_events", {"minutes": 60}))["events"][0]
+    assert "analysis" not in brief
+    assert "source_entity_id" not in brief
+    assert brief["analysis_status"] == "ok"
+    assert brief["analyzed_by"].startswith("mock")
+
+    full = (await call(mcp_server, "home_get_event", {"uid": stored_event}))["event"]
+    assert full["analysis"]["observation"]["scene_summary"]
+
+
+async def test_text_content_is_compact_json(mcp_server, stored_event) -> None:
+    result = await mcp_server.call_tool("home_recent_events", {"minutes": 60})
+    text = result.content[0].text
+    assert "\n" not in text
+    assert json.loads(text) == result.structured_content
+
+
+async def test_an_oversized_list_is_trimmed_and_says_so(mcp_server, stored_event) -> None:
+    from hermes_home.mcp import tools
+
+    result = {
+        "count": 200,
+        "events": [{"occurred_at": f"t{i}", "summary": "x" * 400} for i in range(200)],
+    }
+    tools._fit_events(result, "events", hint="continue with end_time={last}")
+
+    assert len(json.dumps(result)) <= tools.MAX_RESULT_CHARS
+    assert result["count"] == len(result["events"]) < 200
+    assert result["truncated"]["matched"] == 200
+    assert result["truncated"]["hint"].endswith(result["events"][-1]["occurred_at"])
 
 
 async def test_internal_ids_are_never_exposed(mcp_server, stored_event) -> None:
