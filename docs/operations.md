@@ -20,16 +20,33 @@ Everything needed to run hermes-home day to day. `make help` lists the commands.
 | Prune old webhook bodies | `make prune` |
 | SQL shell | `make db-shell` |
 | Shell in container | `make shell` |
+| Vision status | `make vision-status` |
+| Switch to local model | `make vision-local` (`CHECK=1` for a dry run) |
+| Switch to Anthropic | `make vision-anthropic` (`CHECK=1` for a dry run) |
 
 ## What starts automatically
 
 ```
 macOS boot
    └─ user logs in
-        └─ Docker Desktop starts          (AutoStart is enabled)
-             └─ container `hermes-home`   (restart: unless-stopped)
-                  └─ entrypoint: backup if needed → migrate → serve
+        ├─ Docker Desktop starts          (Settings → General → "Start Docker
+        │    │                              Desktop when you sign in" must be on)
+        │    └─ container `hermes-home`   (restart: unless-stopped)
+        │         └─ entrypoint: backup if needed → migrate → serve
+        ├─ Ollama.app starts              (its own login item)
+        └─ LaunchAgent local.ollama.limits
+             └─ re-applies OLLAMA_MAX_LOADED_MODELS / OLLAMA_NUM_PARALLEL,
+                restarting Ollama once if it started without them
 ```
+
+Nothing has to be run after a reboot. To confirm everything came back —
+including which vision provider is live and whether Ollama kept its limits —
+run `make vision-status` once you are logged in. It also warns if Docker
+Desktop's start-at-sign-in setting has been turned off.
+
+The Ollama pieces only matter while `VISION_PROVIDER=ollama`. If Ollama is not
+running, hermes-home still starts and accepts every event; analyses are stored
+as failed until Ollama is back, never sent to Anthropic.
 
 `restart: unless-stopped` restarts the container when the process exits
 non-zero, and starts it again whenever the Docker engine starts. A deliberate
@@ -264,6 +281,48 @@ household image without deciding to send it to the model.
 
 If the probe fails with `HTTP 400`, the runner rejected an option, the image or
 the schema; try `OLLAMA_THINK=omit` before anything else.
+
+### Switching with one command
+
+`scripts/vision.sh` (or the `make vision-*` targets) does steps 2–7 below as
+one command each:
+
+```bash
+make vision-local CHECK=1     # every check, nothing changed
+make vision-local             # switch new analyses to gemma4:31b
+make vision-status            # what is live, last 5 analyses, Ollama, memory
+make vision-anthropic         # switch back
+```
+
+A switch:
+
+1. Checks the image. On first activation, when `hermes-home:0.1.0` predates
+   local vision, it uses `hermes-home:ollama-candidate` and keeps the old image
+   tagged `hermes-home:pre-ollama`.
+2. Checks the provider: Ollama has the model with vision (and warns if Ollama
+   keeps fewer than 2 models loaded), or the Anthropic key is present — never
+   displayed.
+3. Writes the new `.env` to a private file, changing only the vision and
+   timing keys, and validates it in a throwaway container with no database.
+   For Ollama it also checks the container can reach the model.
+4. Backs up the database (`scripts/backup.sh`).
+5. Saves the current `.env` as `~/hermes-home-backups/env.before-<provider>-<stamp>`,
+   installs the new one, recreates the container, and waits up to 90 s for
+   readiness.
+6. If the service does not come back ready, restores the saved `.env` and
+   recreates again, then exits with an error.
+
+The Anthropic switch restores the timing Anthropic always ran with
+(`VISION_TIMEOUT_SECONDS=30`, `INGEST_LEASE_SECONDS=120`) and leaves the
+`OLLAMA_*` lines in place, ignored. Both providers run on the same image, so
+switching back does not need the old image. `LOCAL_MODEL=... make vision-local`
+selects a different installed vision model.
+
+A switch is not proof. Only a newly stored analysis with the new provider is
+(step 6 below); `make vision-status` shows the last five.
+
+The manual steps, kept for reference and for recovery when the script cannot
+run:
 
 ### 5. Activate (human-run, after review)
 

@@ -264,7 +264,16 @@ hermes-home vision check   # metadata only: model installed? vision capability?
 hermes-home vision probe   # ONE live analysis of a generated synthetic frame
 ```
 
-Switching, verifying and rolling back are in
+Switching is one command each way, with a dry run:
+
+```bash
+make vision-local CHECK=1   # all checks, nothing changed
+make vision-local           # switch to the local model
+make vision-anthropic       # switch back
+make vision-status          # what is live, last analyses, Ollama, memory
+```
+
+Details, verification and the manual fallback are in
 [docs/operations.md](docs/operations.md#local-vision-ollama).
 
 `VISION_MODEL` defaults to `claude-sonnet-5` ($2/$10 per Mtok). This fires on

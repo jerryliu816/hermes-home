@@ -11,7 +11,8 @@ CONTAINER_DB := /data/hermes-home.db
 
 .PHONY: help start stop restart status logs follow ready health upgrade rollback \
         backup restore build test lint shell prune \
-        db-shell db-shell-rw db-query db-check db-snapshot
+        db-shell db-shell-rw db-query db-check db-snapshot \
+        vision-status vision-local vision-anthropic
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -69,6 +70,21 @@ rollback:  ## Roll back to a preserved image (see docs/operations.md)
 	@echo "  docker compose up -d --no-build --force-recreate hermes-home"
 	@echo "If the rollback also needs an older schema, restore a backup first:"
 	@echo "  make stop && ./scripts/restore.sh <backup-dir> && make start"
+
+# --- Vision provider --------------------------------------------------------
+#
+# One command each. A switch validates first, backs up, recreates the container,
+# waits for readiness, and restores the previous .env if it does not come up.
+# Add CHECK=1 to run every check without changing anything.
+
+vision-status:  ## Provider in use, recent analyses, Ollama and memory
+	@./scripts/vision.sh status
+
+vision-local:  ## Switch camera analysis to the local Ollama model (CHECK=1: dry run)
+	@./scripts/vision.sh local $(if $(CHECK),--check)
+
+vision-anthropic:  ## Switch camera analysis to Anthropic (CHECK=1: dry run)
+	@./scripts/vision.sh anthropic $(if $(CHECK),--check)
 
 # --- Data -------------------------------------------------------------------
 
