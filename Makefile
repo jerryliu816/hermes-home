@@ -59,12 +59,14 @@ upgrade:  ## Back up, rebuild the image, and restart on the new version
 	$(COMPOSE) up -d
 	@sleep 5 && $(MAKE) --no-print-directory status
 
-rollback:  ## Roll back to the previously built image (see docs/operations.md)
-	@echo "Rolling back means running a previous image tag."
+rollback:  ## Roll back to a preserved image (see docs/operations.md)
+	@echo "Compose always runs hermes-home:0.1.0; rolling back re-points that name."
 	@echo "Available hermes-home images:"
-	@docker images hermes-home --format '  {{.Repository}}:{{.Tag}}  built {{.CreatedSince}}'
+	@docker images hermes-home --format '  {{.Repository}}:{{.Tag}}  {{.ID}}  built {{.CreatedSince}}'
 	@echo
-	@echo "Then: IMAGE_TAG=<tag> docker compose up -d"
+	@echo "Then (restore the matching .env first if settings changed):"
+	@echo "  docker tag hermes-home:<preserved-tag> hermes-home:0.1.0"
+	@echo "  docker compose up -d --no-build --force-recreate hermes-home"
 	@echo "If the rollback also needs an older schema, restore a backup first:"
 	@echo "  make stop && ./scripts/restore.sh <backup-dir> && make start"
 

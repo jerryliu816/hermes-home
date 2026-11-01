@@ -43,6 +43,27 @@ from hermes_home.vision.base import CameraEventContext
 
 PROMPT_VERSION = "scene-v1"
 
+#: Recorded instead of ``PROMPT_VERSION`` on analyses made through Ollama. The
+#: system and user prompts are the same builders' output, byte for byte, but
+#: Ollama's user message also carries :data:`OLLAMA_JSON_GUIDANCE`, so the text
+#: the model actually saw differs and the provenance has to say so. Bump the
+#: suffix when that guidance changes; bump the base when the shared prompt does.
+#:
+#: History: under ``ollama-json-1`` gemma4:31b returned lighting, importance,
+#: overall_confidence and activity as null on all six real frames tried, even in
+#: daylight. The cause was the format schema, not the wording: those keys were
+#: optional and the model omitted them. ``ollama-json-2`` sends every key as
+#: required (still nullable; see vision/ollama.py) and words the guidance to
+#: separate frame-level fields from counts and yes/no fields.
+#: ``ollama-json-3`` adds what each lighting value means (a porch-lit night frame
+#: had come back "daylight" with high confidence), when confidence may be high,
+#: and a suggested set of activity labels (the free-text field had drifted:
+#: "person walking", "person_standing", "person_present").
+#: ``ollama-json-4`` restores null counts for frames darkness hides: under json-3
+#: a nearly black enclosure frame came back with 0 people and 0 vehicles -- a
+#: guessed zero, the exact failure the null rules exist to prevent.
+OLLAMA_PROMPT_VERSION = f"{PROMPT_VERSION}+ollama-json-4"
+
 BASE_VISION_PROMPT = """\
 You analyze a single still frame from a residential security camera and return \
 structured observations.
@@ -128,3 +149,46 @@ def build_user_prompt(context: CameraEventContext) -> str:
         "determine with confidence."
     )
     return "\n".join(lines)
+
+
+#: Appended to the user prompt for Ollama only. Anthropic's structured-output
+#: API binds the schema itself. Ollama constrains decoding with ``format``, and
+#: Ollama's own structured-output guidance also recommends saying so in the
+#: prompt. It restates, and never relaxes, the null rules.
+OLLAMA_JSON_GUIDANCE = """
+
+Reply with exactly one JSON object that matches the provided schema and nothing \
+else: no prose, no markdown.
+
+Two kinds of field, treated differently:
+- Frame-level fields describe the whole image and can be read from any frame \
+you can see at all: lighting, importance, overall_confidence and activity. \
+Always fill them. Leave these null only if the image is unreadable.
+- Counts and yes/no fields (person_count, vehicle_count, animal_count, \
+package_present) are null when this frame does not let you determine them, and \
+0 or false only when you can see that none are present. When darkness, glare \
+or blur hides most of the scene, they are null even if nothing is visible: \
+seeing nothing in a frame you cannot see into is not seeing that none are \
+there. Give the reason in field_notes. A dark frame can still have readable \
+areas; use 0 or false only for what those areas clearly show.
+
+lighting describes the light in this image, judged only from the image:
+- "daylight": lit by the sun or a bright sky.
+- "artificial": a night or indoor scene lit by lamps, porch lights or other \
+fixtures; the surroundings beyond the lit area are dark.
+- "low_light": dim but readable, such as dusk, dawn or deep shade.
+- "dark": little is visible. A grayscale night-vision (infrared) frame is \
+"dark" or "low_light", never "daylight".
+
+overall_confidence is "high" only when the frame is sharp, well lit and \
+unobstructed. Use "medium" for blur, distance or partial occlusion, and "low" \
+when darkness or blur hides most of the scene.
+
+activity is a short lowercase snake_case label for what is happening, not for \
+who is present. Prefer one of: walking, standing, passing_by, visitor_at_door, \
+package_delivery, package_pickup, vehicle_arriving, vehicle_leaving, \
+animal_activity, no_activity. If none fits, use a short label of your own in \
+the same style.
+
+field_notes explains why a field is null. Add an entry only for a field you \
+left null, keyed by that field's name, with a short reason."""

@@ -13,6 +13,10 @@ app = typer.Typer(
 )
 db_app = typer.Typer(help="Database maintenance.", no_args_is_help=True)
 app.add_typer(db_app, name="db")
+vision_app = typer.Typer(
+    help="Vision provider diagnostics. Never touches the database.", no_args_is_help=True
+)
+app.add_typer(vision_app, name="vision")
 
 
 def _alembic_config(settings: Settings):  # type: ignore[no-untyped-def]
@@ -125,6 +129,101 @@ def serve() -> None:
         port=settings.port,
         log_config=None,
     )
+
+
+@vision_app.command("check")
+def vision_check() -> None:
+    """Show what the configured provider reports about its model. Metadata only."""
+    import json
+
+    from hermes_home.vision.registry import build_provider
+
+    settings = Settings()
+    typer.echo(f"provider: {settings.vision_provider}")
+    if settings.vision_provider != "ollama":
+        typer.echo("no metadata check for this provider; nothing was contacted")
+        return
+    provider = build_provider(settings)
+
+    async def _run() -> dict:
+        try:
+            return await provider.diagnose()  # type: ignore[attr-defined]
+        finally:
+            await provider.aclose()  # type: ignore[attr-defined]
+
+    report = asyncio.run(_run())
+    typer.echo(json.dumps(report, indent=2))
+    if not (report["model_present"] and report["vision"] and report["think_setting_ok"]):
+        typer.echo("NOT USABLE for camera analysis (see report above)", err=True)
+        raise typer.Exit(1)
+    typer.echo("model present and reports vision capability")
+
+
+@vision_app.command("probe")
+def vision_probe(
+    image: str = typer.Option(
+        None, help="PNG/JPEG to send instead of the generated synthetic frame."
+    ),
+    camera: str = typer.Option(
+        None, help="Use this camera's prompt (and vision_context); never its images."
+    ),
+    allow_billed: bool = typer.Option(
+        False, "--allow-billed", help="Required to probe a billed cloud provider."
+    ),
+) -> None:
+    """Run ONE live analysis through the real provider code. No DB, no files written."""
+    import json
+    from pathlib import Path
+
+    from hermes_home.vision.probe import (
+        load_probe_image,
+        probe_context,
+        run_probe,
+        synthetic_test_image,
+    )
+    from hermes_home.vision.registry import build_provider
+
+    settings = Settings()
+    if settings.vision_provider == "mock":
+        typer.echo("VISION_PROVIDER=mock makes no network call; nothing to probe", err=True)
+        raise typer.Exit(2)
+    if settings.vision_provider == "anthropic" and not allow_billed:
+        typer.echo("anthropic is billed per call; pass --allow-billed to probe it", err=True)
+        raise typer.Exit(2)
+
+    if image:
+        data, media_type = load_probe_image(Path(image))
+        source = "operator-supplied file"
+    else:
+        data, media_type = synthetic_test_image(), "image/png"
+        source = "generated synthetic frame (no household content)"
+    context = probe_context(settings, camera)
+
+    typer.echo(
+        f"LIVE NETWORK CALL: {settings.vision_provider} model {settings.vision_model}, "
+        f"image: {source}, prompt: {'camera ' + camera if camera else 'generic'}, "
+        f"deadline {settings.vision_timeout_seconds:g}s"
+    )
+    provider = build_provider(settings)
+
+    async def _run() -> dict:
+        try:
+            return await run_probe(
+                provider,
+                data,
+                media_type,
+                context,
+                timeout_seconds=settings.vision_timeout_seconds,
+            )
+        finally:
+            close = getattr(provider, "aclose", None)
+            if close is not None:
+                await close()
+
+    summary = asyncio.run(_run())
+    typer.echo(json.dumps(summary, indent=2))
+    if summary["status"] != "ok":
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

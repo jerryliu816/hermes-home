@@ -14,7 +14,7 @@ Everything needed to run hermes-home day to day. `make help` lists the commands.
 | Recent logs | `make logs` |
 | Follow logs | `make follow` |
 | Upgrade to new code | `make upgrade` |
-| Roll back | `make rollback` (prints the exact steps) |
+| Roll back | `make rollback` (prints the exact steps; see [Rolling back](#rolling-back)) |
 | Back up | `make backup` |
 | Restore | `make stop && make restore FROM=~/hermes-home-backups/<stamp> && make start` |
 | Prune old webhook bodies | `make prune` |
@@ -95,11 +95,25 @@ not churn the disk. Snapshots are capped at the most recent 10.
 
 ## Rolling back
 
+Compose always runs the image named `hermes-home:0.1.0`. There is no
+`IMAGE_TAG` variable, so "running a previous version" means pointing that name
+back at a preserved image, then recreating the container. `docker compose
+restart` is not enough for anything that changes `.env` or the image: it
+reuses the existing container, environment included.
+
+Before any upgrade, preserve the image the container is *actually running* (by
+ID, which is right even if `hermes-home:0.1.0` was rebuilt since):
+
+```bash
+docker tag "$(docker inspect --format '{{.Image}}' hermes-home)" hermes-home:previous
+```
+
 Code only (schema unchanged):
 
-```console
-$ docker images hermes-home            # find the previous tag
-$ docker compose up -d                 # after pointing image: at that tag
+```bash
+docker tag hermes-home:previous hermes-home:0.1.0
+docker compose up -d --no-build --force-recreate hermes-home
+make ready
 ```
 
 Code and schema (the new version migrated the database):
@@ -113,6 +127,302 @@ $ make start
 Restoring a pre-migration snapshot from `data/backups/` works the same way.
 Note that a rollback across a migration discards events recorded since the
 snapshot — check what you would lose first with `make db-shell`.
+
+## Local vision (Ollama)
+
+Camera analysis can run on a vision model served by Ollama on this machine
+instead of Anthropic. The switch is `VISION_PROVIDER`, and it is global: every
+camera uses the one selected provider. There is **no automatic fallback** in
+either direction — if Ollama is stopped, the model is missing, or a reply fails
+validation, the analysis is stored as `failed` (the event itself is always
+kept), and nothing is sent to Anthropic or answered by the mock.
+
+What changes and what does not:
+
+- New analyses record `provider=ollama`, the configured `VISION_MODEL`, and
+  `prompt_version=scene-v1+ollama-json-4`. Existing rows are untouched;
+  history is never reanalyzed (the images were never stored).
+- Freshness, dedupe, the durable inbox, incidents, MCP responses and
+  unknown/null semantics are the same code path for every provider.
+- No database migration is involved in switching or rolling back.
+- `/health` and `/ready` do not check Ollama. A stopped model server must make
+  analyses fail visibly, not restart a service that is still accepting events.
+  Readiness proves the service is wired, never that inference works.
+- `cost_usd` is `0.0`: no per-call bill. Hardware, electricity and the memory
+  the model holds are real costs that this column does not measure.
+
+### How a request is bounded
+
+One analysis attempt is one native `POST /api/chat` (`stream: false`) with the
+frame as bare base64, the `SceneObservation` JSON schema as `format` (every
+key required, nullable fields still nullable), and
+`options: {num_ctx, num_predict, temperature: 0}`. The whole attempt — waiting
+behind other Ollama clients, a cold model load, generation — runs under
+`VISION_TIMEOUT_SECONDS`. The pipeline makes at most two attempts, two seconds
+apart, and only retries timeouts, 429, 5xx and connection failures. A missing
+model (404), an unsupported option/image/schema (400), or a reply that is not a
+complete, valid observation is terminal.
+
+A reply is accepted only if `done` is true, `done_reason` (when present) is
+`stop`, the echoed `model` is exactly the configured one, and `message.content`
+validates as a `SceneObservation` with no extra fields. `message.thinking` is
+never read. Nothing is repaired or defaulted beyond the schema's own nulls.
+Ollama has no refusal signal, so nothing maps to `refused`; a model that
+answers in prose is a `bad_response`.
+
+Lease arithmetic, enforced at startup when `VISION_PROVIDER=ollama`:
+
+```
+freshness (15 x 1s) + 2 x VISION_TIMEOUT_SECONDS + 2s retry + 15s margin < INGEST_LEASE_SECONDS
+15 + 2 x 90 + 2 + 15 = 212s  <  300s
+```
+
+`DELIVERY_SETTLE_SECONDS` does not need to change: reconciliation matches
+triggers to the time each webhook was *received*, which happens before any
+vision work. `SHUTDOWN_GRACE_SECONDS` (30) stays under the Compose stop grace
+(60). A job still analyzing at shutdown is cancelled; its delivery keeps its
+lease and is reclaimed when the lease expires (up to `INGEST_LEASE_SECONDS`
+later). The reclaimed job fetches the camera's *current* event image, which may
+be a later event's or be rejected as stale — the original frame was never kept,
+so time spent down cannot be recovered by any timeout setting.
+
+### 1. Probe Ollama from inside the running container (metadata only)
+
+Proves the container can reach native Ollama, and what Ollama reports about the
+model. No inference, no image, no environment printed:
+
+```bash
+docker compose exec -T hermes-home python -c "
+import httpx
+base = 'http://host.docker.internal:11434'
+print('version', httpx.get(base + '/api/version', timeout=5).json())
+show = httpx.post(base + '/api/show', json={'model': 'gemma4:31b'}, timeout=5).json()
+print('capabilities', show.get('capabilities'))
+print('details', {k: show.get('details', {}).get(k) for k in ('family', 'format', 'quantization_level', 'runner')})
+"
+```
+
+`capabilities` must include `vision`. If it includes `thinking`, use
+`OLLAMA_THINK=false`; if not, `OLLAMA_THINK=omit` (Ollama rejects the flag for
+models without the capability). Also from the host: `ollama list` and
+`ollama show gemma4:31b`. Do not change Ollama's bind address — the container
+reaches it through Docker Desktop's `host.docker.internal`.
+
+### 2. Back up and preserve the current image and settings
+
+```bash
+make backup
+docker tag "$(docker inspect --format '{{.Image}}' hermes-home)" hermes-home:pre-ollama
+docker image inspect --format '{{.Id}}' hermes-home:pre-ollama   # record this ID
+install -m 600 .env ~/hermes-home-backups/env.pre-ollama        # private; never cat it
+```
+
+The Anthropic key stays in that private copy (and in `.env`, unused while
+Ollama is selected); there is no reason to delete or rotate it for this.
+
+### 3. Build and check a candidate image without touching production
+
+```bash
+docker build -t hermes-home:ollama-candidate .
+```
+
+Config check in a throwaway container: no `.env`, no `data/` mount, entrypoint
+overridden so no migration or backup runs against anything:
+
+```bash
+docker run --rm --entrypoint hermes-home \
+  -e VISION_PROVIDER=ollama -e VISION_MODEL=gemma4:31b \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 -e OLLAMA_THINK=false \
+  -e VISION_TIMEOUT_SECONDS=90 -e INGEST_LEASE_SECONDS=300 \
+  hermes-home:ollama-candidate vision check
+```
+
+### 4. Opt-in live probe (real network, synthetic frame)
+
+**This is a real inference call**, unlike the test suite, whose Ollama tests
+all run against a mocked transport. It loads `gemma4:31b` (about 19 GB, as a
+separate runner from Hermes's `gemma4-64k`) and sends one *generated* 320x240
+frame — sky over ground, no household content. It writes nothing and never
+opens the database:
+
+```bash
+docker run --rm --entrypoint hermes-home \
+  -e VISION_PROVIDER=ollama -e VISION_MODEL=gemma4:31b \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 -e OLLAMA_THINK=false \
+  -e OLLAMA_KEEP_ALIVE=30m -e VISION_TIMEOUT_SECONDS=90 -e INGEST_LEASE_SECONDS=300 \
+  hermes-home:ollama-candidate vision probe
+```
+
+Run it twice: the first includes a cold load, the second is warm. Success
+means `status: ok` with a full observation — proof that this runner accepts an
+image together with a JSON schema and that the reply validates. It is not
+evidence of accuracy. To check a camera's prompt (e.g. Gecko's
+`vision_context`) with the same synthetic frame, add
+`-v "$PWD/config:/app/config:ro"` and `--camera gecko`. To use a public test image
+instead, mount it read-only and pass `--image /probe/frame.jpg`. Do not pass a
+household image without deciding to send it to the model.
+
+If the probe fails with `HTTP 400`, the runner rejected an option, the image or
+the schema; try `OLLAMA_THINK=omit` before anything else.
+
+### 5. Activate (human-run, after review)
+
+Edit `.env` (do not print it) so it contains:
+
+```dotenv
+VISION_PROVIDER=ollama
+VISION_MODEL=gemma4:31b
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_NUM_CTX=8192
+OLLAMA_NUM_PREDICT=2048
+OLLAMA_THINK=false
+OLLAMA_KEEP_ALIVE=30m
+VISION_TIMEOUT_SECONDS=90
+INGEST_WORKER_CONCURRENCY=1
+INGEST_LEASE_SECONDS=300
+```
+
+Then point the Compose image name at the reviewed candidate and recreate:
+
+```bash
+docker tag hermes-home:ollama-candidate hermes-home:0.1.0
+docker compose up -d --no-build --force-recreate hermes-home
+make ready
+docker compose logs --since 5m hermes-home | grep -E 'service.started|vision|ERROR'
+```
+
+`service.started` should show `vision_provider: ollama` and the model. A
+`ConfigError` at startup means the model name or lease arithmetic was refused;
+fix `.env` and recreate again, or roll back.
+
+### 6. Verify with a real, freshly stored analysis
+
+`/ready` and a webhook `202` prove nothing about inference. Trigger a camera
+(walk past the front door), wait a minute, then:
+
+```bash
+make db-query SQL="select e.uid, e.occurred_at, a.attempt, a.status, a.provider, a.model, a.prompt_version, a.latency_ms, a.error_code from event_analyses a join events e on e.id = a.event_id order by a.id desc limit 5"
+```
+
+and confirm through Hermes with the MCP tool `home_get_event` on that event's
+uid: the analysis must show `provider: ollama`, `model: gemma4:31b`,
+`prompt_version: scene-v1+ollama-json-4` and status `ok`. Until such a row
+exists, local vision is not active, whatever the configuration says.
+
+### 7. Roll back
+
+```bash
+install -m 600 ~/hermes-home-backups/env.pre-ollama .env
+docker tag hermes-home:pre-ollama hermes-home:0.1.0
+docker compose up -d --no-build --force-recreate hermes-home
+make ready
+```
+
+Then confirm the next stored analysis shows `provider: anthropic`. No database
+restore is needed: the schema did not change. Analyses recorded while Ollama
+was active stay in history with their own provenance.
+
+### Evaluating real-image quality
+
+One good probe is not evidence of unattended security quality. Before relying
+on it, collect real events under each condition, with your explicit decision
+to send those frames to the local model (they are still analyzed and
+discarded; nothing extra is retained):
+
+- daylight, dusk and full darkness (IR) at the front door;
+- partial occlusion (porch column, someone at the frame edge);
+- packages left and packages collected;
+- vehicles in view, animals in view;
+- the Gecko enclosure: gecko visible, hidden, and an empty-looking enclosure.
+
+For each, compare the stored observation with what a person sees in the live
+camera at that moment, and record a human rating per field (counts, package,
+lighting, nulls used correctly versus guessed zeros). That rating is the
+accuracy measure; the model's own `overall_confidence` is a different thing and
+is not evidence of correctness. Past events cannot be reanalyzed, because
+their images were discarded; evaluation needs new events.
+
+### Running alongside Hermes's model
+
+Hermes uses `gemma4-64k` (64K context); the camera uses `gemma4:31b` at 8K.
+They are different models to Ollama, so with Ollama's default of **one loaded
+model** each request evicts the other. Measured that way, single camera
+analyses took 25–80 s (the 90 s deadline nearly reached) and Hermes reloaded
+after every camera event.
+
+Ollama's server must allow both to stay loaded. These are Ollama-wide settings,
+outside this repository, and a deliberate operator choice:
+
+```bash
+launchctl setenv OLLAMA_MAX_LOADED_MODELS 3
+launchctl setenv OLLAMA_NUM_PARALLEL 1
+# then quit Ollama from the menu bar and reopen it
+grep "server config" ~/.ollama/logs/server.log | tail -1 | tr ' ' '\n' | grep -E 'MAX_LOADED|NUM_PARALLEL'
+```
+
+`launchctl setenv` does **not** survive a logout or reboot; Ollama would then
+start with one loaded model again and the eviction behaviour return. On the
+Studio this is handled by a LaunchAgent outside the repository,
+`~/Library/LaunchAgents/local.ollama.limits.plist`, which re-applies both values
+at login, then checks Ollama's own `server config` log line and restarts
+Ollama once if it had already started with the defaults. Its log is
+`~/Library/Logs/ollama-limits.log`. After a reboot, confirm with the `grep`
+above.
+
+To undo:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/local.ollama.limits.plist
+rm ~/Library/LaunchAgents/local.ollama.limits.plist
+launchctl unsetenv OLLAMA_MAX_LOADED_MODELS
+launchctl unsetenv OLLAMA_NUM_PARALLEL
+# then quit Ollama from the menu bar and reopen it
+```
+
+Measured on the Mac Studio (M5 Max, 128 GB, Ollama 0.40.13, MLX runner) with
+`OLLAMA_MAX_LOADED_MODELS=3`, `OLLAMA_NUM_PARALLEL=1`, two runs of six real
+frames overlapping long Hermes-model generations:
+
+| | Result |
+|---|---|
+| Both models stayed loaded | yes, every 1 s sample; no reload (`load_duration` ≈ 0) after first load |
+| Camera, warm, no overlap | 2.6–4.2 s |
+| Camera while the Hermes model generates | 4.9–10.7 s |
+| Camera, cold load while Hermes model resident | 7.6 s (1.2 s load) |
+| Hermes model while camera requests run | ≈ 26 tokens/s vs ≈ 36 alone (~28 % slower during overlap); never reloaded |
+| Valid observations | 14 of 14 |
+| Resident size | camera ≈ 25.5 GB, Hermes model ≈ 20–28 GB (both grow with use) |
+| Memory pressure | normal while idle or while only one model generates; **brief critical spikes (1–3 s, 18–20 % free) when both generate at once**, each adding ~5 GB of swap |
+
+The critical spikes need simultaneous generation on both models: a long
+Hermes-model generation with no camera traffic stayed at normal pressure.
+Nothing failed and nothing was evicted, but repeated overlap accumulates swap.
+`OLLAMA_MAX_LOADED_MODELS=3` would also let a third model load beside these two;
+`qwen3-coder-next` alone is ~51 GB, so loading it while both are resident was
+not tested and is likely to push the machine into sustained swapping.
+
+Timing review against these numbers: the worst measured analysis (10.7 s) is
+far inside `VISION_TIMEOUT_SECONDS=90`. Keep 90 rather than lowering it: if the
+loaded-model limit reverts to 1 (e.g. after a reboot), evict-and-reload
+analyses were measured at up to 80 s, and those should still complete rather
+than fail. The lease budget is then 15 + 2 × 90 + 2 + 15 = 212 s, under
+`INGEST_LEASE_SECONDS=300`. A camera request queues only behind other requests
+for `gemma4:31b` itself (one worker, `NUM_PARALLEL=1`), never behind Hermes's
+model. A normal job (≈4 s freshness + 3–11 s analysis) finishes well inside
+`SHUTDOWN_GRACE_SECONDS=30`. `DELIVERY_SETTLE_SECONDS` stays at 90.
+
+### What to measure
+
+- Cold and warm total latency: `latency_ms` in `event_analyses`, and the probe.
+- Timeout and failure rate: `select provider, status, error_code, count(*) from event_analyses group by 1,2,3`.
+- Queue behavior during bursts: `make status` (queue counts) and the gap
+  between `received_at` and the analysis `completed_at`.
+- `ollama ps` during and after events: which runners are loaded, their size,
+  and when the camera model unloads.
+- Memory pressure (Activity Monitor → Memory, or `memory_pressure`) with the
+  camera model, Hermes's model and any coding model loaded at once.
+- Latency while Hermes or a coding model is generating: Ollama may queue the
+  camera request behind them, and that wait counts against the deadline.
 
 ## Never read the live database from the host
 

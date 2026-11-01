@@ -246,6 +246,26 @@ fails immediately with the offending name, rather than at 3am on a real event.
 |---|---|---|
 | `mock` (default) | nothing | Deterministic, seeded from the image hash. Fully functional. |
 | `anthropic` | `ANTHROPIC_API_KEY` | Structured output via the Messages API. |
+| `ollama` | a local vision model in Ollama, e.g. `VISION_MODEL=gemma4:31b` | Native `/api/chat` with the observation JSON schema as `format`. No key, no per-call cost. |
+
+Exactly one provider handles every camera, and there is no fallback: if the
+selected provider is down, the analysis is stored as failed and the event is
+kept. Each analysis row records its `provider`, `model` and `prompt_version`
+(`scene-v1` for Anthropic, `scene-v1+ollama-json-4` for Ollama, whose user
+message adds a short JSON-only instruction).
+
+Ollama settings (`OLLAMA_BASE_URL`, `OLLAMA_NUM_CTX`, `OLLAMA_NUM_PREDICT`,
+`OLLAMA_THINK`, `OLLAMA_KEEP_ALIVE`) are documented in `.env.example`. Selecting
+Ollama also requires a lease long enough for two slow attempts; startup refuses
+otherwise. Diagnostics that never touch the database:
+
+```bash
+hermes-home vision check   # metadata only: model installed? vision capability?
+hermes-home vision probe   # ONE live analysis of a generated synthetic frame
+```
+
+Switching, verifying and rolling back are in
+[docs/operations.md](docs/operations.md#local-vision-ollama).
 
 `VISION_MODEL` defaults to `claude-sonnet-5` ($2/$10 per Mtok). This fires on
 every camera event, so the cost knob is deliberate and is one line:

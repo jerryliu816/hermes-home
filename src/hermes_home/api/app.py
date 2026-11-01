@@ -96,7 +96,6 @@ async def build_state(settings: Settings, *, start_worker: bool = True) -> AppSt
     state.integrity_ok, state.integrity_detail = await quick_check(engine)
     if not state.integrity_ok:
         logger.error("database.quick_check_failed", detail=state.integrity_detail)
-    
 
     if start_worker:
         state.worker = IngestWorker(
@@ -145,6 +144,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info(
             "service.started",
             vision_provider=settings.vision_provider,
+            vision_model=settings.vision_model if settings.vision_provider != "mock" else None,
             cameras=sorted(state.cameras.cameras),
             mcp_enabled=mcp is not None,
         )
@@ -164,6 +164,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await state.health_monitor.stop()
             if state.worker is not None:
                 await state.worker.stop()
+            # After the worker, so no in-flight analysis loses its client. A
+            # provider without network resources simply has no aclose().
+            close_vision = getattr(state.vision, "aclose", None)
+            if close_vision is not None:
+                await close_vision()
             await state.ha_client.aclose()
             if state.verify_engine is not None:
                 await state.verify_engine.dispose()

@@ -212,3 +212,181 @@ def test_config_dir_does_not_point_into_site_packages() -> None:
 def test_config_dir_is_overridable_by_env(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     assert Settings(_env_file=None).config_dir == tmp_path
+
+
+# --------------------------------------------------------------------------- #
+# Vision provider selection
+# --------------------------------------------------------------------------- #
+
+
+def _runtime(**overrides) -> Settings:
+    values = {"_env_file": None, "webhook_secret": "s", "home_assistant_token": "t"}
+    values.update(overrides)
+    return Settings(**values)
+
+
+def test_defaults_keep_an_existing_deployment_unchanged() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.vision_provider == "mock"
+    assert settings.vision_model == "claude-sonnet-5"
+    assert settings.vision_timeout_seconds == 30.0
+    assert settings.ingest_lease_seconds == 120
+    assert settings.delivery_settle_seconds == 90
+    assert settings.ollama_think == "omit"
+    assert settings.ollama_keep_alive is None
+
+
+def test_extra_env_names_alone_cannot_select_ollama(monkeypatch) -> None:
+    """Adding OLLAMA_* values without VISION_PROVIDER changes nothing."""
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+    monkeypatch.setenv("VISION_MODEL", "gemma4:31b")
+    assert Settings(_env_file=None).vision_provider == "mock"
+
+
+def test_ollama_does_not_require_an_anthropic_key() -> None:
+    _runtime(
+        vision_provider="ollama", vision_model="gemma4:31b", anthropic_api_key=""
+    ).require_for_runtime()
+
+
+def test_anthropic_still_requires_its_key_with_ollama_settings_present() -> None:
+    settings = _runtime(
+        vision_provider="anthropic",
+        anthropic_api_key="",
+        ollama_base_url="http://127.0.0.1:11434",
+    )
+    with pytest.raises(ConfigError, match="ANTHROPIC_API_KEY"):
+        settings.require_for_runtime()
+
+
+def test_ollama_refuses_the_default_claude_model_name() -> None:
+    with pytest.raises(ConfigError, match="VISION_MODEL"):
+        _runtime(vision_provider="ollama").require_for_runtime()
+
+
+def test_ollama_refuses_a_lease_shorter_than_the_worst_case_job() -> None:
+    settings = _runtime(
+        vision_provider="ollama",
+        vision_model="gemma4:31b",
+        vision_timeout_seconds=90,
+        ingest_lease_seconds=120,
+    )
+    with pytest.raises(ConfigError, match="INGEST_LEASE_SECONDS"):
+        settings.require_for_runtime()
+
+    # The recommended values fit: 15 + 2*90 + 2 + 15 = 212 < 300.
+    ok = _runtime(
+        vision_provider="ollama",
+        vision_model="gemma4:31b",
+        vision_timeout_seconds=90,
+        ingest_lease_seconds=300,
+    )
+    assert ok.analysis_budget_seconds == 212
+    ok.require_for_runtime()
+
+
+def test_the_lease_check_does_not_newly_constrain_anthropic() -> None:
+    _runtime(
+        vision_provider="anthropic",
+        anthropic_api_key="k",
+        vision_timeout_seconds=90,
+        ingest_lease_seconds=120,
+    ).require_for_runtime()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("http://127.0.0.1:11434", "http://127.0.0.1:11434"),
+        ("http://host.docker.internal:11434/", "http://host.docker.internal:11434"),
+        ("https://ollama.example.test", "https://ollama.example.test"),
+    ],
+)
+def test_ollama_base_url_is_normalized(value, expected) -> None:
+    assert Settings(_env_file=None, ollama_base_url=value).ollama_base_url == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "host.docker.internal:11434",
+        "ftp://host.docker.internal:11434",
+        "http://user:hunter2-secret@host.docker.internal:11434",
+        "http://host.docker.internal:11434?token=hunter2-secret",
+        "http://host.docker.internal:11434#frag",
+        "http://host.docker.internal:11434/v1",
+        "http://host.docker.internal:11434/api",
+        "http://",
+    ],
+)
+def test_bad_ollama_base_urls_are_rejected_without_echoing_them(value) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, ollama_base_url=value)
+    assert "hunter2-secret" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("ollama_num_ctx", 1024),
+        ("ollama_num_ctx", 65536),
+        ("ollama_num_predict", 100),
+        ("ollama_num_predict", 100000),
+        ("vision_timeout_seconds", 0),
+        ("vision_timeout_seconds", 3600),
+        ("ollama_think", "maybe"),
+        ("ollama_keep_alive", "-1"),
+        ("ollama_keep_alive", "forever"),
+    ],
+)
+def test_ollama_numeric_and_enum_settings_are_bounded(field, value) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: value})
+
+
+def test_registry_builds_each_provider() -> None:
+    from hermes_home.vision.mock import MockVisionProvider
+    from hermes_home.vision.ollama import OllamaVisionProvider
+    from hermes_home.vision.registry import build_provider
+
+    assert isinstance(build_provider(Settings(_env_file=None)), MockVisionProvider)
+
+    ollama = build_provider(
+        Settings(
+            _env_file=None,
+            vision_provider="ollama",
+            vision_model="gemma4:31b",
+            ollama_base_url="http://host.docker.internal:11434/",
+            ollama_think="false",
+            ollama_keep_alive="30m",
+            vision_timeout_seconds=90,
+            ingest_lease_seconds=300,
+        )
+    )
+    assert isinstance(ollama, OllamaVisionProvider)
+    assert ollama.name == "ollama"
+    assert ollama.model == "gemma4:31b"
+    assert ollama._base_url == "http://host.docker.internal:11434"
+    import asyncio
+
+    asyncio.run(ollama.aclose())
+
+    pytest.importorskip("anthropic")
+    from hermes_home.vision.anthropic import AnthropicVisionProvider
+
+    anthropic = build_provider(
+        Settings(_env_file=None, vision_provider="anthropic", anthropic_api_key="test-key")
+    )
+    assert isinstance(anthropic, AnthropicVisionProvider)
+
+
+def test_registry_refuses_an_undeliberate_ollama_selection() -> None:
+    """The container never runs require_for_runtime, so the registry checks too."""
+    from hermes_home.vision.registry import build_provider
+
+    with pytest.raises(ConfigError):
+        build_provider(Settings(_env_file=None, vision_provider="ollama"))
