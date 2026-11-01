@@ -12,8 +12,10 @@ starts with no webhook secret is worse than one that refuses to start.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -37,7 +39,11 @@ DEFAULT_ALEMBIC_INI = Path("alembic.ini")
 class Settings(BaseSettings):
     """Environment-driven settings. Secrets live here and nowhere else."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # hide_input_in_errors: a validation error must name the bad setting without
+    # echoing its value, which may be a token or a URL with credentials in it.
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
+    )
 
     # Home Assistant. The URL is entirely env-driven so a changed HA address
     # never requires a source change.
@@ -49,12 +55,35 @@ class Settings(BaseSettings):
     webhook_secret: str = ""
     webhook_max_body_bytes: int = 65536
 
-    # Vision
-    vision_provider: Literal["mock", "anthropic"] = "mock"
+    # Vision. One provider for every camera, chosen here and nowhere else.
+    # There is deliberately no fallback: an outage of the selected provider is
+    # recorded as a failed analysis, never quietly answered by a different one.
+    vision_provider: Literal["mock", "anthropic", "ollama"] = "mock"
     vision_model: str = "claude-sonnet-5"
     anthropic_api_key: str = ""
-    vision_timeout_seconds: float = 30.0
+    #: Total deadline for ONE analysis attempt, end to end. For Ollama that
+    #: includes waiting behind other requests, a cold model load, and generation.
+    vision_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
     vision_retain_images: bool = False
+
+    # Ollama (only read when VISION_PROVIDER=ollama). The native API, not the
+    # OpenAI-compatible /v1 one: the native endpoint takes a JSON schema in
+    # ``format`` and reports completion status we can verify.
+    #: Native API base. http://127.0.0.1:11434 when run natively, and
+    #: http://host.docker.internal:11434 from inside the container. No /v1.
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    #: Context for the camera request only. One frame plus the prompt fits in a
+    #: few thousand tokens; this does not touch any other Ollama client's context.
+    ollama_num_ctx: int = Field(default=8192, ge=2048, le=32768)
+    ollama_num_predict: int = Field(default=2048, ge=256, le=8192)
+    #: Whether to send ``think``. "omit" sends nothing, which is the only safe
+    #: choice for a model without the thinking capability (Ollama rejects the
+    #: flag there). "false" is recommended for a thinking-capable model: this is
+    #: perception on one frame, and reasoning tokens only add latency.
+    ollama_think: Literal["omit", "true", "false"] = "omit"
+    #: Per-request keep_alive, e.g. "30m". Unset leaves Ollama's own default.
+    #: Never changes Ollama's global configuration.
+    ollama_keep_alive: str | None = None
 
     # Ingest worker
     ingest_worker_concurrency: int = Field(default=1, ge=1, le=16)
@@ -90,8 +119,9 @@ class Settings(BaseSettings):
     #: that is skipped or slow does not leave an unexamined hole.
     delivery_reconciliation_lookback_seconds: int = Field(default=3600, ge=300)
     #: How long a trigger is given to become a delivery before it counts as
-    #: missing. Must exceed the freshness budget plus vision time, or a delivery
-    #: still legitimately in flight is reported as lost.
+    #: missing. Deliveries are matched on ``received_at``, which is committed
+    #: when the webhook arrives, so this covers transit from Home Assistant --
+    #: not freshness or vision time, which happen after receipt.
     delivery_settle_seconds: int = Field(default=90, ge=30, le=600)
     #: Half-width of the window in which a delivery is considered to belong to
     #: a trigger. The automation posts within milliseconds; this is slack for
@@ -163,6 +193,52 @@ class Settings(BaseSettings):
     def _strip_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")
 
+    @field_validator("ollama_base_url")
+    @classmethod
+    def _validate_ollama_base_url(cls, value: str) -> str:
+        """A bare native API origin: no credentials, query, fragment or API path.
+
+        Errors name the problem but never echo the value, which could carry a
+        credential someone pasted into it.
+        """
+        value = value.strip().rstrip("/")
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("OLLAMA_BASE_URL must be an http(s) URL with a host")
+        if parts.username or parts.password:
+            raise ValueError("OLLAMA_BASE_URL must not contain credentials")
+        if parts.query or parts.fragment:
+            raise ValueError("OLLAMA_BASE_URL must not contain a query or fragment")
+        if parts.path.rstrip("/").endswith(("/v1", "/api")):
+            raise ValueError(
+                "OLLAMA_BASE_URL is the native API base without /v1 or /api, "
+                "e.g. http://host.docker.internal:11434"
+            )
+        return value
+
+    @field_validator("ollama_keep_alive")
+    @classmethod
+    def _validate_keep_alive(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip()
+        # Ollama's duration syntax; a negative or unbounded value would pin the
+        # model in memory forever, which should be a deliberate global choice.
+        if not re.fullmatch(r"\d{1,4}(s|m|h)", value):
+            raise ValueError("OLLAMA_KEEP_ALIVE must look like 300s, 30m or 2h")
+        return value
+
+    @property
+    def analysis_budget_seconds(self) -> float:
+        """Worst-case time one delivery can legitimately hold its lease.
+
+        Freshness wait, two bounded analysis attempts with the pipeline's retry
+        delay between them, and a margin for persistence. The lease must exceed
+        this, or a slow but healthy job is reclaimed and processed twice.
+        """
+        freshness = self.freshness_poll_attempts * self.freshness_poll_interval_seconds
+        return freshness + 2 * self.vision_timeout_seconds + 2.0 + 15.0
+
     def mcp_host_allowlist(self) -> list[str]:
         """Host values the MCP endpoint accepts, with and without the port."""
         names = ["localhost", "127.0.0.1"]
@@ -190,6 +266,35 @@ class Settings(BaseSettings):
         if missing:
             raise ConfigError(
                 "missing required configuration: " + ", ".join(missing) + ". See .env.example."
+            )
+        self.validate_ollama_selection()
+
+    def validate_ollama_selection(self) -> None:
+        """Checks that make choosing Ollama a deliberate, workable act.
+
+        Called from :meth:`require_for_runtime` and again when the provider is
+        built. The second call matters: the container starts uvicorn's app
+        factory directly, which never passes through the CLI's runtime check.
+        """
+        if self.vision_provider != "ollama":
+            return
+        if self.vision_model.startswith("claude-"):
+            # The default model name is Anthropic's. Selecting Ollama without
+            # choosing a local model would send a request bound to fail on every
+            # event; make the choice explicit instead.
+            raise ConfigError(
+                "VISION_PROVIDER=ollama needs VISION_MODEL set to an installed local "
+                "vision model (e.g. gemma4:31b), not a Claude model name"
+            )
+        # Enforced for Ollama only, where long timeouts are expected. Applying it
+        # to an existing Anthropic deployment could refuse to start a service
+        # that runs fine today, and that path is not changing here.
+        if self.ingest_lease_seconds <= self.analysis_budget_seconds:
+            raise ConfigError(
+                f"INGEST_LEASE_SECONDS={self.ingest_lease_seconds} does not exceed the "
+                f"worst-case job time of {self.analysis_budget_seconds:.0f}s (freshness "
+                "budget + 2 x VISION_TIMEOUT_SECONDS + retry delay + margin); a slow job "
+                "would be reclaimed and processed twice. Raise the lease or lower the timeout."
             )
 
 

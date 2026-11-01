@@ -366,3 +366,34 @@ async def test_liveness_never_fails_on_integrity(client) -> None:
 
     assert response.status_code == 200
     assert response.json()["integrity"] == "malformed"
+
+
+# --------------------------------------------------------------------------- #
+# Vision provider lifetime
+# --------------------------------------------------------------------------- #
+
+
+async def test_shutdown_closes_the_vision_provider(engine, settings, monkeypatch) -> None:
+    """A provider holding an HTTP client gets it closed, after the worker stops."""
+    settings.camera_health_enabled = False
+    settings.delivery_reconciliation_enabled = False
+    closed: list[bool] = []
+
+    class ClosableProvider(MockVisionProvider):
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr("hermes_home.api.app.build_provider", lambda _s: ClosableProvider())
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        assert closed == []
+        assert app.state.app_state.worker.running
+    assert closed == [True]
+
+
+async def test_shutdown_tolerates_a_provider_without_aclose(engine, settings) -> None:
+    settings.camera_health_enabled = False
+    settings.delivery_reconciliation_enabled = False
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        assert not hasattr(app.state.app_state.vision, "aclose")

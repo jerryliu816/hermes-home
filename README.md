@@ -59,7 +59,9 @@ have to:
 2. **Fetches the still** the camera captured for that event, waiting for it to
    actually arrive rather than grabbing the previous frame.
 3. **Interprets it** with a vision model into structured fields — people,
-   vehicles, packages, activity, lighting — not prose.
+   vehicles, packages, activity, lighting — not prose. The model is your
+   choice: Anthropic in the cloud, or a vision model running locally in
+   Ollama, switched with one command.
 4. **Throws the image away**, keeping the interpretation.
 5. **Files it in place and time**: which zone, which camera, what else was
    happening nearby.
@@ -107,6 +109,16 @@ matching, no identity tracked across events, and the data model has nowhere to
 put one. "A person in a blue jacket" is the intended register; "this is Jerry"
 is not expressible.
 
+**Cloud or local, and never silently both.** Camera analysis runs on Anthropic
+or on a vision model served by Ollama on the same machine — `make vision-local`
+and `make vision-anthropic` switch between them, validating first and undoing
+themselves if the service does not come back. With the local model, frames
+never leave the house and there is no per-event bill. There is no fallback in
+either direction: if the selected model is down, the event is still recorded
+and its analysis is marked failed, rather than quietly answered by a different
+model. Every analysis says which provider, model and prompt version produced
+it, so history stays interpretable across a switch.
+
 **Vendor-neutral.** Home Assistant is the device abstraction, so there is no
 Eufy code here. Replacing every camera with another brand changes entity IDs in
 a YAML file. Adding a different *kind* of device later — a Powerwall, a door
@@ -114,8 +126,9 @@ sensor — is a new event type, not a schema change, because the event table nev
 knew what a camera was.
 
 **Boring to run.** One container, one SQLite file on the host, no broker, no
-external services. It restarts itself, survives reboots, and backs up with
-`make backup`.
+external services. It restarts itself, comes back on its own after a reboot,
+backs up with `make backup`, and `make vision-status` shows in one screen what
+is running, what it last analyzed, and with which model.
 
 > One operational rule, learned the hard way: **never open the database from
 > macOS while the container is running.** Use `make db-query`, `make db-shell`,
@@ -149,7 +162,8 @@ events into structured, timestamped, located observations and keeps them.
           |                 |     freshness gate                    |
           |                 |     fetch event still from HA         |
           |                 |     content dedupe                    |
-          |                 |     vision analysis                   |
+          |                 |     vision analysis (Anthropic or     |
+          |                 |       local Ollama, one at a time)    |
           |                 |     discard the image                 |
           |                 |     persist event + analysis          |
           |                 +---------------------------------------+
@@ -228,9 +242,6 @@ python3.11 -m venv .venv && .venv/bin/pip install -e ".[dev,anthropic,mcp]"
 It runs with **no API keys at all** — the default vision provider is a
 deterministic mock. Point it at a real model only when you are ready.
 
-Then follow [docs/home-assistant-setup.md](docs/home-assistant-setup.md) to add
-the automation.
-
 ## Configuration
 
 Secrets and deployment settings live in `.env` (gitignored). The non-secret
@@ -242,15 +253,79 @@ fails immediately with the offending name, rather than at 3am on a real event.
 
 ### Vision providers
 
-| `VISION_PROVIDER` | Needs | Notes |
-|---|---|---|
-| `mock` (default) | nothing | Deterministic, seeded from the image hash. Fully functional. |
-| `anthropic` | `ANTHROPIC_API_KEY` | Structured output via the Messages API. |
+| `VISION_PROVIDER` | Needs | Recorded `prompt_version` | Notes |
+|---|---|---|---|
+| `mock` (default) | nothing | `scene-v1` | Deterministic, seeded from the image hash. Fully functional. |
+| `anthropic` | `ANTHROPIC_API_KEY` | `scene-v1` | Structured output via the Messages API, with prompt caching. |
+| `ollama` | Ollama running natively, and an installed vision model in `VISION_MODEL` (e.g. `gemma4:31b`) | `scene-v1+ollama-json-4` | Native `/api/chat` with the observation JSON schema as `format`. No key, no per-call cost. |
+
+Exactly one provider handles every camera, and there is no fallback: if the
+selected provider is down, the analysis is stored as failed and the event is
+kept. Analyses already stored keep the provider, model and prompt version they
+were made with; nothing is reanalyzed (the images were never kept).
 
 `VISION_MODEL` defaults to `claude-sonnet-5` ($2/$10 per Mtok). This fires on
 every camera event, so the cost knob is deliberate and is one line:
 `claude-opus-5` ($5/$25) if accuracy disappoints, `claude-haiku-4-5` ($1/$5)
-once volume grows.
+once volume grows. With `VISION_PROVIDER=ollama`, startup refuses a `claude-*`
+model name: choosing a local model has to be deliberate.
+
+#### Local vision with Ollama
+
+The Ollama provider holds a local model to the same contract as Anthropic, and
+is stricter about what counts as an answer:
+
+- **Same prompt, same schema.** It uses the shared prompt builder, including
+  each camera's `vision_context`, plus a short Ollama-only instruction (what
+  each lighting value means, suggested activity labels, and that a frame
+  darkness hides keeps its counts *unknown*). That extra text is why its rows
+  record a distinct prompt version.
+- **Every field answered or explicitly unknown.** The schema sent to Ollama
+  marks every key required while keeping nullable fields nullable. Without
+  that, a local model simply left fields out and they were recorded as
+  unknown when the model had never said so.
+- **Only complete, valid replies count.** The reply must be finished
+  (`done`, `done_reason: stop`), name the model that was asked for, and
+  validate as an observation with no extra fields. Prose, fenced JSON, a
+  truncated reply or a reasoning trace is a failed analysis, never repaired.
+- **Bounded.** One deadline (`VISION_TIMEOUT_SECONDS`) covers queueing behind
+  other Ollama clients, a cold model load and generation. Only timeouts, busy
+  and server errors and connection failures are retried, once, by the
+  pipeline. A missing model or an unsupported option fails immediately.
+- **Nothing private in errors.** Stored error messages are fixed strings: no
+  response body, prompt, camera context or image data.
+
+| Setting | Default | For local vision | Purpose |
+|---|---|---|---|
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | `http://host.docker.internal:11434` | Native API base (never `/v1`); the container reaches the host's Ollama this way |
+| `OLLAMA_NUM_CTX` | `8192` | `8192` | Context for the camera request only, not Ollama-wide |
+| `OLLAMA_NUM_PREDICT` | `2048` | `2048` | Output token limit; a reply cut off here is rejected |
+| `OLLAMA_THINK` | `omit` | `false` | `omit`, `true` or `false`; `false` for thinking-capable models |
+| `OLLAMA_KEEP_ALIVE` | unset | `30m` | Per-request keep-alive; never changes Ollama's own settings |
+| `VISION_TIMEOUT_SECONDS` | `30` | `90` | Total deadline per attempt |
+| `INGEST_LEASE_SECONDS` | `120` | `300` | Must exceed freshness + 2 × timeout + retry + margin; startup refuses otherwise |
+
+You do not normally set these by hand: `make vision-local` applies the
+right-hand column and `make vision-anthropic` restores Anthropic's values (see
+[Switching the vision provider](#switching-the-vision-provider)).
+
+**Running beside another local model.** If something else on the machine uses
+a different Ollama model — Hermes does — Ollama must be allowed to keep both
+loaded (`OLLAMA_MAX_LOADED_MODELS` of at least 2), or each request evicts the
+other and analyses slow to 25–80 s. On the reference Mac Studio this is set
+at every login by a small LaunchAgent; the setup, measured latency and memory
+behaviour are in
+[docs/operations.md](docs/operations.md#running-alongside-hermess-model).
+
+**Which model.** On six real frames (one per camera; a small sample, not an
+accuracy measurement) `gemma4:31b`'s person, vehicle, animal and package
+counts matched a manual reading of every frame and left the dark Gecko frame's counts unknown, as it
+should. `qwen3.6:35b-a3b` was faster but left many readable counts unknown and
+rated routine scenes high importance. Anthropic's descriptions were the
+richest, but it gave different counts for the same frame across runs, and it
+costs per event. `gemma4:31b` is the recommended local model; judge it on your
+own events before relying on it unattended — the evaluation plan is in
+[docs/operations.md](docs/operations.md#evaluating-real-image-quality).
 
 ### Retention
 
@@ -263,23 +338,93 @@ once volume grows.
 
 `hermes-home db prune` runs the sweep manually; the worker also runs it hourly.
 
+## Switching the vision provider
+
+One command each way, run from the repository on the host. Each one checks
+everything before it changes anything, and puts things back if the service
+does not come back ready.
+
+| Command | Does |
+|---|---|
+| `make vision-status` | What is running and on which image/commit, the provider in use vs. `.env`, readiness, the last five analyses, Ollama's version, limits and loaded models, memory pressure, and a warning if Docker Desktop will not start at sign-in |
+| `make vision-local` | Switch new analyses to the local model (`gemma4:31b` by default) |
+| `make vision-anthropic` | Switch new analyses back to Anthropic |
+| `make vision-local CHECK=1` / `make vision-anthropic CHECK=1` | Dry run: every check and validation, nothing changed |
+
+The `make` targets call `scripts/vision.sh status|local|anthropic [--check]`,
+which can also be run directly. A switch:
+
+1. **Checks the image.** On the first switch to local, when the running image
+   predates local vision, it uses `hermes-home:ollama-candidate` and keeps the
+   previous image tagged `hermes-home:pre-ollama`.
+2. **Checks the provider.** For local: Ollama is reachable, the model is
+   installed and reports vision, and a warning if Ollama keeps fewer than two
+   models loaded. For Anthropic: the API key is present (never displayed).
+3. **Validates the new settings.** Writes a new `.env` to a private file,
+   changing only the vision and timing keys — every other line, secrets
+   included, is copied untouched and never printed — and runs `check-config`
+   on it in a throwaway container with no database. For local, it also
+   confirms the container can reach the model.
+4. **Backs up the database** (`scripts/backup.sh`).
+5. **Switches.** Saves the current `.env` as
+   `~/hermes-home-backups/env.before-<provider>-<timestamp>` (mode 600),
+   installs the new one, recreates the container, and waits up to 90 s for
+   readiness.
+6. **Reverts on failure.** If the service is not ready, the saved `.env` is
+   restored and the container recreated again; the command exits with an
+   error.
+
+The `.env` editing in step 3 is `scripts/set_env_keys.py SOURCE DEST KEY=VALUE...`,
+a standard-library-only helper that writes a new 0600 file and prints only the
+values it set.
+
+Overrides: `LOCAL_MODEL=qwen3.6:35b-a3b make vision-local` selects another
+installed vision model; `ANTHROPIC_MODEL=...` does the same for Anthropic;
+`BACKUP_DIR=...` moves where `.env` copies are kept.
+
+A switch is not proof that the new model is in use. Trigger a camera, then run
+`make vision-status`: the newest analysis must show the new provider, model
+and prompt version. Hermes's `home_get_event` shows the same thing per event.
+
+### Vision diagnostics
+
+`hermes-home vision` runs the real provider code against the configured
+provider without touching the database or writing a file:
+
+| Command | Does |
+|---|---|
+| `hermes-home vision check` | Metadata only: Ollama's version, whether the model is installed, its capabilities, and whether `OLLAMA_THINK` suits it. Exits non-zero if the model cannot analyze images. |
+| `hermes-home vision probe` | **One live analysis** of a generated 320×240 test frame (sky over ground; no household content), printing status, latency, tokens and the observation. |
+| `... probe --image PATH` | Analyze a PNG or JPEG you choose instead. |
+| `... probe --camera KEY` | Use that camera's prompt, including its `vision_context`. Never fetches its images. |
+| `... probe --allow-billed` | Required to probe Anthropic, which bills per call. |
+
+To probe a provider before switching to it, run the CLI in a throwaway
+container with the settings passed explicitly — the exact commands are in
+[docs/operations.md](docs/operations.md#local-vision-ollama). A probe proves
+the plumbing (the model accepted the image and the schema, and the reply
+validated), not accuracy.
+
 ## Development
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 327 tests, no network, no credentials
+.venv/bin/python -m pytest tests/ -q      # 464 tests, no network, no credentials
 .venv/bin/ruff check src/ tests/
 .venv/bin/ruff format src/ tests/
 ```
 
 The suite runs the real Alembic migration chain rather than `create_all`, so a
-broken migration fails the tests instead of surfacing at deploy time.
+broken migration fails the tests instead of surfacing at deploy time. The Ollama
+tests drive the real provider over a mocked HTTP transport: they pin down the
+exact request and every way a reply is rejected, but cannot show that a real
+model accepts it — that is what `hermes-home vision probe` is for.
 
 ## Documentation
 
 | Document | Covers |
 |---|---|
 | [architecture.md](docs/architecture.md) | layers, data flow, why the queue is SQLite |
-| [operations.md](docs/operations.md) | start/stop/upgrade/rollback/backup/restore |
+| [operations.md](docs/operations.md) | start/stop/upgrade/rollback/backup/restore, what starts after a reboot, local vision setup, switching, measurements and evaluation |
 | [threat-model.md](docs/threat-model.md) | assets, controls, and stated limitations |
 | [spatial-model.md](docs/spatial-model.md) | zones, coverage, adding a camera |
 | [camera-health.md](docs/camera-health.md) | camera health, historical coverage, why unknown is not false |
@@ -289,8 +434,11 @@ broken migration fails the tests instead of surfacing at deploy time.
 | [camera-event-images.md](docs/camera-event-images.md) | measured Eufy timing and resolution |
 
 Notable tests: the end-to-end pipeline (`test_ingest_pipeline.py`), crash
-recovery and exactly-once semantics (`test_worker_recovery.py`), and webhook
-authentication (`test_webhook_api.py`).
+recovery and exactly-once semantics (`test_worker_recovery.py`), webhook
+authentication (`test_webhook_api.py`), the Ollama request contract and
+rejection rules (`test_ollama_provider.py`), Ollama through the real worker and
+retry path (`test_ollama_pipeline.py`), and the provider-switch scripts
+(`test_vision_scripts.py`).
 
 ## MCP
 
@@ -311,6 +459,22 @@ Runs as a container, restarting on failure and whenever the Docker engine
 starts. The database lives on the host at `./data/`, outside the disposable
 container filesystem. `make help` lists every operational command; see
 [docs/operations.md](docs/operations.md) and [docs/threat-model.md](docs/threat-model.md).
+
+### After a reboot
+
+Nothing to run, once someone logs in:
+
+1. Docker Desktop starts (Settings → General → *Start Docker Desktop when you
+   sign in* must be on), and the `hermes-home` container starts with it.
+2. Ollama starts from its own login item.
+3. The `local.ollama.limits` LaunchAgent re-applies Ollama's loaded-model
+   limits, restarting Ollama once if it came up without them.
+
+Then `make vision-status` confirms all of it. Docker Desktop and the
+LaunchAgents run inside a user session, so an unattended reboot waits for a
+login. If Ollama does not come up while the local model is selected,
+hermes-home still accepts and stores every event; their analyses are marked
+failed until Ollama returns — never sent to Anthropic instead.
 
 Port 8099 is published on exactly two addresses — `127.0.0.1` for Hermes and the
 LAN address for Home Assistant — never `0.0.0.0`, and never to the internet.
@@ -336,5 +500,6 @@ LAN address for Home Assistant — never `0.0.0.0`, and never to the internet.
 - [x] Multi-camera rollout (configuration, not code)
 - [x] Camera health and historical coverage
 - [x] Delivery reconciliation against Home Assistant
+- [x] Local vision with Ollama, switchable with one command
 - [ ] Incident correlation across zones
 - [ ] Powerwall / energy events

@@ -396,3 +396,61 @@ async def test_the_ingest_pipeline_hands_each_camera_its_own_context(
 
     assert seen["front_door"].context.vision_context is None
     assert build_system_prompt(seen["front_door"].context) == BASE_VISION_PROMPT
+
+
+# --------------------------------------------------------------------------- #
+# The same guarantees through the Ollama provider
+# --------------------------------------------------------------------------- #
+
+
+async def test_ollama_sends_each_camera_its_own_context_and_nothing_else() -> None:
+    """One provider instance, two cameras in turn: no context carries over."""
+    import json
+
+    import httpx
+
+    from hermes_home.vision.ollama import OBSERVATION_SCHEMA, OllamaVisionProvider
+    from hermes_home.vision.prompts import OLLAMA_JSON_GUIDANCE
+
+    cameras = load_cameras_config(FIXTURE_CONFIG).cameras
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json={
+                "model": body["model"],
+                "message": {"role": "assistant", "content": '{"scene_summary": "a frame"}'},
+                "done": True,
+                "done_reason": "stop",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OllamaVisionProvider(base_url="http://ollama.test:11434", model="m", client=client)
+
+    order = ["gecko", "front_door", "gecko"]
+    for key in order:
+        result = await provider.analyze(
+            VisionRequest(image=TINY_IMAGE, context=_context(key, cameras[key]))
+        )
+        assert result.ok, key
+
+    for key, body in zip(order, bodies, strict=True):
+        system, user = body["messages"]
+        context = _context(key, cameras[key])
+        assert system["content"] == build_system_prompt(context), key
+        assert GECKO_MARKER not in user["content"], key
+        assert user["content"].endswith(OLLAMA_JSON_GUIDANCE), key
+        if key == "gecko":
+            assert GECKO_MARKER in system["content"]
+            assert system["content"].startswith(BASE_VISION_PROMPT)
+        else:
+            assert system["content"] == BASE_VISION_PROMPT
+        # The schema is the same whatever the camera's context says.
+        assert body["format"] == OBSERVATION_SCHEMA
+        assert body["format"]["properties"] == SceneObservation.model_json_schema()["properties"]
+
+    await client.aclose()
