@@ -145,6 +145,45 @@ still be `partial` or `none`.
 
 Full semantics in [camera-health.md](camera-health.md).
 
+## Query context: what today is, and when the record begins
+
+`home_recent_events`, `home_search_events`, `home_summarize_activity` and
+`home_coverage` also return a `query_context` block:
+
+```json
+"query_context": {
+  "now_utc": "2026-11-01T09:12:04.551Z",
+  "now_local": "2026-11-01T01:12:04.551-08:00",
+  "today": "Sunday 1 November 2026",
+  "timezone": "America/Los_Angeles",
+  "first_event_at": "2026-10-31T21:07:41.950690+00:00",
+  "health_tracking_from": "2026-10-31T07:05:46.741618+00:00",
+  "note": "Nothing is recorded for this period: it ends 2025-11-01T07:00:00+00:00, but this system began recording at 2026-10-31T07:05:46.741618+00:00 (Saturday 31 October 2026). Today is Sunday 1 November 2026 (America/Los_Angeles). If a recent period was meant, check the year and date used and ask again."
+}
+```
+
+It exists because of a real mistake. Asked about "the evening of October 31",
+the agent chose the year itself and searched 2025. The service answered
+correctly — zero events, health `before_health_tracking` — and the agent
+faithfully reported that nothing could be confirmed. Every statement was true
+and none pointed at the wrong year.
+
+- `today` spells out the year in the display timezone, because the year is the
+  part a model most often gets wrong.
+- `first_event_at` and `health_tracking_from` are when this system began
+  recording, across all cameras. They say whether the service existed yet, not
+  whether a particular camera was busy.
+- `note` appears only when an explicit period **ends before** the earliest of
+  those two times, or **starts after** now. It tells the caller to check the
+  date and ask again.
+
+It changes nothing else. Counts, events, `complete: null` and the
+`before_health_tracking` unknown period are exactly what they were. A period
+that health tracking covered but that had no events gets no note, because that
+empty result is real. With no history recorded at all, no note is given.
+`home_recent_events` carries the block without a note, since its window always
+ends now.
+
 ## Example result
 
 `home_recent_events(minutes=1440)`:
