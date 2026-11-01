@@ -23,7 +23,7 @@ import structlog
 from pydantic import Field
 
 from hermes_home.api.deps import AppState
-from hermes_home.core.time import ensure_utc, now_utc, parse_ha_timestamp
+from hermes_home.core.time import ensure_utc, now_utc, parse_ha_timestamp, to_display_tz
 from hermes_home.services.event_service import MAX_LIMIT, EventService
 from hermes_home.spatial import cameras_observing, coverage_of
 from hermes_home.storage.engine import session_scope
@@ -72,6 +72,62 @@ async def _coverage_blocks(
     if pipeline:
         blocks["event_pipeline_coverage"] = pipeline.model_dump(mode="json")
     return blocks
+
+
+def _long_date(value: datetime) -> str:
+    """'Sunday 1 November 2026' -- the year spelled out, since that is what goes wrong."""
+    return f"{value:%A} {value.day} {value:%B %Y}"
+
+
+async def _query_context(
+    svc: EventService,
+    state: AppState,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> dict[str, Any]:
+    """Today's date and when recording began, plus a note if the period is outside it.
+
+    A model choosing dates for a question like "the evening of October 31" has
+    to supply the year itself, and a local model will sometimes supply the wrong
+    one. Measured here: asked about Oct 31 2026, Hermes searched Oct 31 2025,
+    got zero events and "before health tracking", and correctly reported that
+    nothing could be confirmed -- about a year in which nothing was recorded.
+    Every answer was true; none of them pointed at the mistake.
+
+    This changes no count, event or coverage value. It only puts the current
+    date beside the answer, and says so plainly when the requested period ends
+    before anything was recorded or starts after now.
+    """
+    tz = state.settings.display_timezone
+    now = now_utc()
+    local_now = to_display_tz(now, tz)
+    first_event, health_from = await svc.history_start()
+    context: dict[str, Any] = {
+        "now_utc": now.isoformat(),
+        "now_local": local_now.isoformat(),
+        "today": _long_date(local_now),
+        "timezone": tz,
+        "first_event_at": first_event.isoformat() if first_event else None,
+        "health_tracking_from": health_from.isoformat() if health_from else None,
+    }
+
+    recorded_from = min((t for t in (first_event, health_from) if t is not None), default=None)
+    if end is not None and recorded_from is not None and ensure_utc(end) < recorded_from:
+        context["note"] = (
+            f"Nothing is recorded for this period: it ends {ensure_utc(end).isoformat()}, "
+            f"but this system began recording at {recorded_from.isoformat()} "
+            f"({_long_date(to_display_tz(recorded_from, tz))}). Today is "
+            f"{context['today']} ({tz}). If a recent period was meant, check the year and "
+            "date used and ask again."
+        )
+    elif start is not None and ensure_utc(start) > now:
+        context["note"] = (
+            f"This period starts {ensure_utc(start).isoformat()}, which is after the "
+            f"current time. Today is {context['today']} ({tz}). Check the year and date "
+            "used and ask again."
+        )
+    return context
 
 
 def _coverage_note(state: AppState, zone: str | None) -> dict[str, Any] | None:
@@ -172,6 +228,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
                     svc, start=window_start, end=window_end, camera=camera, zone=zone
                 )
             )
+            result["query_context"] = await _query_context(svc, state)
             if not events:
                 # An empty window is the moment a caller is most likely to give
                 # up on this tool and go looking elsewhere. Say what does exist.
@@ -221,7 +278,11 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "When the search is time-bounded AND filtered by camera or zone, a `coverage` "
             "block reports whether those cameras were working across that period. An "
             "empty event list with coverage.complete false or null does NOT mean nothing "
-            "happened - say what was actually unobserved."
+            "happened - say what was actually unobserved.\n\n"
+            "Every result carries query_context with today's date and when recording "
+            "began. If it has a `note`, the period you asked about is outside the "
+            "recorded history (often a wrong year): fix the dates and ask again "
+            "rather than reporting the empty result."
         ),
     )
     async def home_search_events(
@@ -258,6 +319,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
             operational = await _coverage_blocks(
                 svc, start=start, end=end, camera=camera, zone=zone
             )
+            context = await _query_context(svc, state, start=start, end=end)
         logger.info(
             "mcp.home_search_events",
             returned=len(events),
@@ -273,6 +335,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
         if coverage:
             result["field_of_view"] = coverage
         result.update(operational)
+        result["query_context"] = context
         return result
 
     @mcp.tool(
@@ -388,7 +451,11 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "For a zone, complete true means AT LEAST ONE camera covering that zone was "
             "working throughout - not that all of them were. field_of_view is a separate "
             "fact about where cameras point, and may still be partial or none even when "
-            "coverage is complete: the equipment worked, but it never saw all of the area."
+            "coverage is complete: the equipment worked, but it never saw all of the area.\n\n"
+            "Every result carries query_context with today's date and when recording "
+            "began. If it has a `note`, the period you asked about is outside the "
+            "recorded history (often a wrong year): fix the dates and ask again "
+            "rather than reporting the empty result."
         ),
     )
     async def home_coverage(
@@ -417,6 +484,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
             pipeline = await svc.pipeline_coverage_for(
                 start=start, end=end, camera=camera, zone=zone
             )
+            context = await _query_context(svc, state, start=start, end=end)
         if view is None:
             return {
                 "error": f"no camera configured as {camera!r}",
@@ -432,6 +500,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
         result: dict[str, Any] = {"camera_health_coverage": view.model_dump(mode="json")}
         if pipeline:
             result["event_pipeline_coverage"] = pipeline.model_dump(mode="json")
+        result["query_context"] = context
         return result
 
     @mcp.tool(
@@ -446,7 +515,11 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "- write the narrative yourself from these numbers.\n\n"
             "With a zone or camera, a `coverage` block reports whether those cameras were "
             "working across the period. A count of zero with incomplete coverage is not a "
-            "quiet period; disclose the gap."
+            "quiet period; disclose the gap.\n\n"
+            "Every result carries query_context with today's date and when recording "
+            "began. If it has a `note`, the period you asked about is outside the "
+            "recorded history (often a wrong year): fix the dates and ask again "
+            "rather than reporting the empty result."
         ),
     )
     async def home_summarize_activity(
@@ -471,10 +544,12 @@ def register_tools(mcp: Any, state: AppState) -> None:
             operational = await _coverage_blocks(
                 svc, start=ensure_utc(start), end=ensure_utc(end), camera=camera, zone=zone
             )
+            context = await _query_context(svc, state, start=start, end=end)
         logger.info("mcp.home_summarize_activity", event_count=summary.event_count, zone=zone)
         result = summary.model_dump(mode="json")
         note = _coverage_note(state, zone)
         if note:
             result["field_of_view"] = note
         result.update(operational)
+        result["query_context"] = context
         return result

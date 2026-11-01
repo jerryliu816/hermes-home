@@ -48,6 +48,7 @@ from hermes_home.spatial import (
 )
 from hermes_home.storage.models import (
     CameraHealth,
+    CameraHealthInterval,
     Event,
     EventAnalysis,
     EventTag,
@@ -109,6 +110,21 @@ class EventService:
                 return None
             stmt = stmt.where(Event.source_entity_id.in_(entities))
         return await self._session.scalar(stmt)
+
+    async def history_start(self) -> tuple[datetime | None, datetime | None]:
+        """When recording began: the first stored event, and the first health interval.
+
+        Used to tell a caller that a period it asked about predates everything
+        this service has ever recorded. Global rather than per camera on
+        purpose: the question it answers is "did this system exist yet?", and a
+        per-camera answer would turn a quiet camera into a false signpost.
+        """
+        first_event = await self._session.scalar(select(func.min(Event.occurred_at)))
+        health_from = await self._session.scalar(select(func.min(CameraHealthInterval.started_at)))
+        return (
+            ensure_utc(first_event) if first_event else None,
+            ensure_utc(health_from) if health_from else None,
+        )
 
     async def search_events(
         self,
