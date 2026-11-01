@@ -50,6 +50,23 @@ will infer "zero" from an absent field. `person_count: null` means *not
 determinable from the image*; `person_count: 0` means *none were visible*. These
 are different claims and the distinction is preserved end to end.
 
+## Events in lists are briefs
+
+`home_recent_events`, `home_search_events` and the `timeline` of
+`home_summarize_activity` return each event as a brief: `uid`, `event_type`,
+`camera`, `zone`, `occurred_at` / `occurred_at_local`, `tags`, `summary`, the
+`person_count` / `vehicle_count` / `animal_count` / `package_present` values
+(explicit `null` when unknown), `analysis_status`, `analyzed_by`
+(`provider/model`), `duplicate_count` and `incident_uid`. `home_get_event`
+returns the full event, including the whole structured observation.
+
+The full shape ran to about 1.5 KB an event, so 20 events came to 37 KB and
+Hermes, on a 64K-context model, spilled the result to disk and read it back in
+pieces. A list result is also capped at about 20K characters: when events are
+dropped to fit, `truncated` gives `returned`, `matched`, and a `hint` naming the
+`end_time` (or `start_time`, for a timeline) that continues from where it was
+cut. Text content is single-line JSON.
+
 ## The tools
 
 ### `home_recent_events(minutes=60, camera=None, zone=None, limit=20)`

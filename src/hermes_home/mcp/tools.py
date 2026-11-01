@@ -16,14 +16,18 @@ and are expected to be stable.
 
 from __future__ import annotations
 
+import functools
+import json
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 import structlog
+from mcp_types import CallToolResult, TextContent
 from pydantic import Field
 
 from hermes_home.api.deps import AppState
 from hermes_home.core.time import ensure_utc, now_utc, parse_ha_timestamp, to_display_tz
+from hermes_home.domain.dto import EventBrief
 from hermes_home.services.event_service import MAX_LIMIT, EventService
 from hermes_home.spatial import cameras_observing, coverage_of
 from hermes_home.storage.engine import session_scope
@@ -157,21 +161,92 @@ def _coverage_note(state: AppState, zone: str | None) -> dict[str, Any] | None:
     return {"zone": zone, "status": status, "cameras": watching, "note": note}
 
 
+#: The most text one tool result may carry. An agent spills a larger result to
+#: disk and keeps only a preview, and Hermes scales that threshold to its model:
+#: on a 64K-token model it is roughly 34K characters. A result over it costs a
+#: round of file reading before any question can be answered, so list results
+#: stay well under it and say plainly when they were cut.
+MAX_RESULT_CHARS = 20_000
+
+
+def _size(payload: Any) -> int:
+    return len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+
+
+def _fit_events(result: dict[str, Any], key: str, *, hint: str) -> None:
+    """Drop events from the end of ``result[key]`` until the result fits.
+
+    The trimmed result says how many were left out and how to reach them, so a
+    shortened list is never read as the whole of it.
+    """
+    events = result[key]
+    total = len(events)
+    if _size(result) <= MAX_RESULT_CHARS:
+        return
+    # Reserve room for the truncation note itself before trimming.
+    budget = MAX_RESULT_CHARS - 600 - _size({**result, key: []})
+    kept: list[Any] = []
+    for event in events:
+        budget -= _size(event) + 1
+        if budget < 0:
+            break
+        kept.append(event)
+    result[key] = kept
+    if "count" in result:
+        result["count"] = len(kept)
+    result["truncated"] = {
+        "returned": len(kept),
+        "matched": total,
+        "hint": hint.format(last=kept[-1]["occurred_at"] if kept else None),
+    }
+
+
+def _compact(result: dict[str, Any]) -> CallToolResult:
+    """Send the result as one line of JSON rather than the library's indent=2.
+
+    Indentation alone was a fifth of a large result. The structured content is
+    unchanged; only the text copy a model reads gets smaller.
+    """
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text", text=json.dumps(result, separators=(",", ":"), ensure_ascii=False)
+            )
+        ],
+        structured_content=result,
+    )
+
+
 def register_tools(mcp: Any, state: AppState) -> None:
     """Attach every tool to ``mcp``, closing over the shared application state."""
 
     def service(session: Any) -> EventService:
         return EventService(session, settings=state.settings, cameras=state.cameras)
 
+    def tool(**kwargs: Any) -> Any:
+        """``mcp.tool``, with every result sent as compact JSON."""
+
+        def register(fn: Any) -> Any:
+            @functools.wraps(fn)
+            async def compacted(*args: Any, **kw: Any) -> Any:
+                return _compact(await fn(*args, **kw))
+
+            return mcp.tool(**kwargs)(compacted)
+
+        return register
+
     # ----------------------------------------------------------------- #
 
-    @mcp.tool(
+    @tool(
         name="home_recent_events",
         title="Recent home events",
         description=(
             "THE DEFAULT TOOL for any question about what has happened around the home. "
             "Returns stored camera and sensor observations, newest first, with what was "
-            "seen in each.\n\n"
+            "seen in each: a one-line summary, tags and the person/vehicle/animal/package "
+            "counts. For every field of one event's analysis, call home_get_event with "
+            "its uid. A long list is cut to stay small; `truncated` then says how many "
+            "were left out and how to fetch them.\n\n"
             "Use it for questions like: 'What happened at the front door?', 'What "
             "happened recently?', 'Who or what was detected?', 'Did anyone come to the "
             "house?', 'Was a package delivered?', 'What happened while I was away?', "
@@ -218,7 +293,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
             result: dict[str, Any] = {
                 "window_minutes": minutes,
                 "count": len(events),
-                "events": [e.model_dump(mode="json") for e in events],
+                "events": [EventBrief.of(e).model_dump(mode="json") for e in events],
             }
             coverage = _coverage_note(state, zone)
             if coverage:
@@ -249,6 +324,14 @@ def register_tools(mcp: Any, state: AppState) -> None:
                         "watches records nothing, which is not the same as nothing "
                         "having happened."
                     )
+            _fit_events(
+                result,
+                "events",
+                hint=(
+                    "Older events in the window were left out to keep this result small. "
+                    "For them, call home_search_events with end_time={last}."
+                ),
+            )
         # zone included: without it a zone-filtered empty result is
         # indistinguishable from a broken query when reading the trail.
         logger.info(
@@ -260,7 +343,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
         )
         return result
 
-    @mcp.tool(
+    @tool(
         name="home_search_events",
         title="Search home events",
         description=(
@@ -329,16 +412,24 @@ def register_tools(mcp: Any, state: AppState) -> None:
         )
         result: dict[str, Any] = {
             "count": len(events),
-            "events": [e.model_dump(mode="json") for e in events],
+            "events": [EventBrief.of(e).model_dump(mode="json") for e in events],
         }
         coverage = _coverage_note(state, zone)
         if coverage:
             result["field_of_view"] = coverage
         result.update(operational)
         result["query_context"] = context
+        _fit_events(
+            result,
+            "events",
+            hint=(
+                "Older matching events were left out to keep this result small. For "
+                "them, search again with end_time={last}."
+            ),
+        )
         return result
 
-    @mcp.tool(
+    @tool(
         name="home_get_event",
         title="Get one home event",
         description=(
@@ -356,7 +447,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
             return {"found": False, "uid": uid, "event": None}
         return {"found": True, "uid": uid, "event": event.model_dump(mode="json")}
 
-    @mcp.tool(
+    @tool(
         name="home_list_zones",
         title="List home zones",
         description=(
@@ -371,7 +462,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
             zones = await service(session).list_zones()
         return {"count": len(zones), "zones": [z.model_dump(mode="json") for z in zones]}
 
-    @mcp.tool(
+    @tool(
         name="home_describe_home",
         title="Describe the home",
         description=(
@@ -394,7 +485,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
             home = await service(session).describe_home()
         return home.model_dump(mode="json")
 
-    @mcp.tool(
+    @tool(
         name="home_list_cameras",
         title="List cameras and their health",
         description=(
@@ -434,7 +525,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
             cameras.append(row)
         return {"count": len(views), "by_status": by_status, "cameras": cameras}
 
-    @mcp.tool(
+    @tool(
         name="home_coverage",
         title="Historical camera coverage",
         description=(
@@ -503,7 +594,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
         result["query_context"] = context
         return result
 
-    @mcp.tool(
+    @tool(
         name="home_summarize_activity",
         title="Summarize home activity",
         description=(
@@ -552,4 +643,13 @@ def register_tools(mcp: Any, state: AppState) -> None:
             result["field_of_view"] = note
         result.update(operational)
         result["query_context"] = context
+        _fit_events(
+            result,
+            "timeline",
+            hint=(
+                "The timeline was cut to keep this result small; the counts still cover "
+                "every event. For later events, call home_search_events with "
+                "start_time={last}."
+            ),
+        )
         return result

@@ -67,6 +67,70 @@ class EventView(BaseModel):
     incident_uid: str | None = None
 
 
+class EventBrief(BaseModel):
+    """One observation as it appears in a list: what a reader needs to answer.
+
+    List tools return many events at once, and the full ``EventView`` is mostly
+    pipeline detail (entity ids, receive time, prompt version, latency) plus a
+    scene summary repeated inside the observation. Measured on a real day: 20
+    full events came to 37 KB, enough to push a 64K-context agent into spilling
+    the result to disk and reading it back in pieces. The brief keeps the facts
+    and drops the plumbing; ``home_get_event`` still returns everything.
+
+    The counts keep the explicit-null rule: ``person_count: null`` is unknown,
+    not zero, so the keys are always present.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    uid: str
+    event_type: str
+    camera: str | None
+    zone: str | None
+    occurred_at: datetime
+    occurred_at_local: str
+    tags: list[str] = Field(default_factory=list)
+    summary: str | None
+    person_count: int | None
+    vehicle_count: int | None
+    animal_count: int | None
+    package_present: bool | None
+    analysis_status: str | None = Field(
+        description="ok | failed | refused | skipped; null if never analyzed."
+    )
+    analyzed_by: str | None = Field(description='"provider/model" of the latest analysis.')
+    duplicate_count: int
+    incident_uid: str | None
+
+    @classmethod
+    def of(cls, view: EventView) -> EventBrief:
+        analysis = view.analysis
+        observation = (analysis.observation if analysis else None) or {}
+        analyzed_by = None
+        if analysis:
+            analyzed_by = (
+                f"{analysis.provider}/{analysis.model}" if analysis.model else analysis.provider
+            )
+        return cls(
+            uid=view.uid,
+            event_type=view.event_type,
+            camera=view.camera,
+            zone=view.zone,
+            occurred_at=view.occurred_at,
+            occurred_at_local=view.occurred_at_local,
+            tags=view.tags,
+            summary=view.summary,
+            person_count=observation.get("person_count"),
+            vehicle_count=observation.get("vehicle_count"),
+            animal_count=observation.get("animal_count"),
+            package_present=observation.get("package_present"),
+            analysis_status=analysis.status if analysis else None,
+            analyzed_by=analyzed_by,
+            duplicate_count=view.duplicate_count,
+            incident_uid=view.incident_uid,
+        )
+
+
 class ZoneView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -306,5 +370,5 @@ class ActivitySummary(BaseModel):
     by_camera: dict[str, int]
     by_tag: dict[str, int]
     incident_count: int
-    timeline: list[EventView]
+    timeline: list[EventBrief]
     note: str | None = None

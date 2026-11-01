@@ -23,6 +23,7 @@ from hermes_home.domain.dto import (
     CameraView,
     CoverageSpan,
     CoverageView,
+    EventBrief,
     EventView,
     HomeView,
     PipelineCoverageView,
@@ -240,7 +241,8 @@ class EventService:
             by_camera=dict(Counter(e.camera for e in events if e.camera)),
             by_tag=dict(Counter(tag for e in events for tag in e.tags)),
             incident_count=incident_count or 0,
-            timeline=list(reversed(events)),  # chronological reads better as a story
+            # chronological reads better as a story
+            timeline=[EventBrief.of(e) for e in reversed(events)],
             note=note,
         )
 
