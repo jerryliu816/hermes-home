@@ -17,6 +17,11 @@ vision_app = typer.Typer(
     help="Vision provider diagnostics. Never touches the database.", no_args_is_help=True
 )
 app.add_typer(vision_app, name="vision")
+sensors_app = typer.Typer(
+    help="Sensor readings: what is synced, and what HA has that is not configured.",
+    no_args_is_help=True,
+)
+app.add_typer(sensors_app, name="sensors")
 
 
 def _alembic_config(settings: Settings):  # type: ignore[no-untyped-def]
@@ -101,7 +106,10 @@ def check_config() -> None:
     from hermes_home.config import (
         load_cameras_config,
         load_home_config,
+        load_sensors_config,
+        validate_cameras_against_settings,
         validate_home_and_cameras,
+        validate_sensors,
     )
 
     settings = Settings()
@@ -109,9 +117,12 @@ def check_config() -> None:
     home = load_home_config(settings.config_dir)
     cameras = load_cameras_config(settings.config_dir)
     validate_home_and_cameras(home, cameras)
+    validate_cameras_against_settings(settings, cameras)
+    sensors = load_sensors_config(settings.config_dir)
+    validate_sensors(home, sensors, cameras)
     typer.echo(
         f"configuration ok: {len(home.zones)} zones, {len(cameras.cameras)} cameras, "
-        f"vision provider {settings.vision_provider}"
+        f"{len(sensors.sensors)} sensors, vision provider {settings.vision_provider}"
     )
 
 
@@ -228,3 +239,79 @@ def vision_probe(
 
 if __name__ == "__main__":
     app()
+
+
+@sensors_app.command("status")
+def sensors_status() -> None:
+    """Latest stored reading per measurement, and how far each is synced.
+
+    Reads the database, so run it inside the container (make sensors-status).
+    """
+    from hermes_home.config import load_sensors_config
+    from hermes_home.services.sensor_service import SensorService
+    from hermes_home.storage.engine import create_engine, create_session_factory, session_scope
+
+    settings = Settings()
+    sensors = load_sensors_config(settings.config_dir)
+    if not sensors.sensors:
+        typer.echo("no sensors configured (config/sensors.yaml is absent or empty)")
+        return
+
+    async def _run() -> list[dict]:
+        engine = create_engine(settings.database_url)
+        try:
+            async with session_scope(create_session_factory(engine)) as session:
+                svc = SensorService(session, settings=settings, sensors=sensors)
+                return await svc.current(sorted(sensors.sensors))
+        finally:
+            await engine.dispose()
+
+    for sensor in asyncio.run(_run()):
+        typer.echo(f"{sensor['key']}  ({sensor['name']}, zone {sensor['zone']})")
+        for name, m in sensor["measurements"].items():
+            value = "-" if m["value"] is None else f"{m['value']} {m['unit'] or ''}".strip()
+            flag = {True: "in range", False: "OUT OF RANGE", None: ""}[m["in_range"]]
+            typer.echo(
+                f"  {name:<12} {value:<12} {m['status']:<12} {flag:<13} "
+                f"confirmed {m['confirmed_through'] or 'never'}"
+                + (f"  error {m['sync_error']}" if m["sync_error"] else "")
+            )
+
+
+@sensors_app.command("discover")
+def sensors_discover(
+    all_numeric: bool = typer.Option(
+        False, "--all-numeric", help="Offer every numeric sensor, not just temp/humidity/battery."
+    ),
+) -> None:
+    """List Home Assistant sensor entities, and print a stub for unconfigured ones.
+
+    Read-only: never writes configuration.
+    """
+    from hermes_home.clients.home_assistant import HomeAssistantClient
+    from hermes_home.config import load_sensors_config
+    from hermes_home.sensors.discover import candidates, stub
+
+    settings = Settings()
+    sensors = load_sensors_config(settings.config_dir)
+
+    async def _run():  # type: ignore[no-untyped-def]
+        async with HomeAssistantClient(
+            settings.home_assistant_url,
+            settings.home_assistant_token,
+            timeout_seconds=settings.home_assistant_timeout_seconds,
+        ) as client:
+            return await client.list_states()
+
+    found = candidates(asyncio.run(_run()), sensors, all_numeric=all_numeric)
+    if not found:
+        typer.echo("no matching sensor entities in Home Assistant")
+        return
+    for c in found:
+        where = f"configured as {c.configured_as}" if c.configured_as else "not configured"
+        reading = f"{c.state} {c.unit or ''}".strip()
+        typer.echo(f"{c.entity_id:<55} {reading:<12} {where}")
+    text = stub(found)
+    if text:
+        typer.echo("\n# Paste under `sensors:` in config/sensors.yaml, then make restart:\n")
+        typer.echo(text)

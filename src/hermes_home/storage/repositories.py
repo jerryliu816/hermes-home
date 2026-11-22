@@ -29,6 +29,8 @@ from hermes_home.storage.models import (
     EventDelivery,
     EventTag,
     Incident,
+    SensorState,
+    SensorSyncState,
 )
 
 
@@ -613,3 +615,74 @@ class DeliveryGapRepository:
             moment = ensure_utc(last_verified_delivery_at)
             if current is None or moment > current:
                 state.last_verified_delivery_at = moment
+
+
+class SensorRepository:
+    """Stored sensor readings and how far each measurement has been synced."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def sync_state(self, sensor_key: str, measurement: str) -> SensorSyncState | None:
+        return await self._session.get(SensorSyncState, (sensor_key, measurement))
+
+    async def all_sync_states(self) -> list[SensorSyncState]:
+        return list((await self._session.scalars(select(SensorSyncState))).all())
+
+    def add_sync_state(self, row: SensorSyncState) -> None:
+        self._session.add(row)
+
+    async def last_state(self, sensor_key: str, measurement: str) -> SensorState | None:
+        return await self._session.scalar(
+            select(SensorState)
+            .where(SensorState.sensor_key == sensor_key, SensorState.measurement == measurement)
+            .order_by(SensorState.started_at.desc())
+            .limit(1)
+        )
+
+    def add_state(self, row: SensorState) -> None:
+        self._session.add(row)
+
+    async def states_between(
+        self, sensor_key: str, measurement: str, *, start: datetime, end: datetime
+    ) -> list[SensorState]:
+        """Rows that apply anywhere in [start, end], oldest first.
+
+        Includes the last row before ``start``: in a step function that row is
+        what held at ``start``, and leaving it out would turn the opening of
+        every window into a gap.
+        """
+        start, end = ensure_utc(start), ensure_utc(end)
+        base = select(SensorState).where(
+            SensorState.sensor_key == sensor_key, SensorState.measurement == measurement
+        )
+        carry_in = await self._session.scalar(
+            base.where(SensorState.started_at <= start)
+            .order_by(SensorState.started_at.desc())
+            .limit(1)
+        )
+        inside = (
+            await self._session.scalars(
+                base.where(SensorState.started_at > start, SensorState.started_at <= end).order_by(
+                    SensorState.started_at
+                )
+            )
+        ).all()
+        return ([carry_in] if carry_in is not None else []) + list(inside)
+
+    async def first_known_at(self, sensor_key: str, measurement: str) -> datetime | None:
+        """When this measurement's record begins: its earliest row HA actually had."""
+        return await self._session.scalar(
+            select(func.min(SensorState.started_at)).where(
+                SensorState.sensor_key == sensor_key,
+                SensorState.measurement == measurement,
+                SensorState.status != "no_record",
+            )
+        )
+
+    async def prune(self, *, older_than_days: int) -> int:
+        cutoff = now_utc() - timedelta(days=older_than_days)
+        result = await self._session.execute(
+            delete(SensorState).where(SensorState.started_at < cutoff)
+        )
+        return int(result.rowcount or 0)

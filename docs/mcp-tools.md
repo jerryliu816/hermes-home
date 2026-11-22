@@ -125,6 +125,27 @@ determinable, never "probably fine".
 Whether a camera or zone was actually being watched during a past period.
 Exactly one of `camera` / `zone`.
 
+### `home_list_sensors(sensor=None, zone=None)`
+
+Every configured sensor (or one, by key, name or alias; or those in a zone)
+with its latest stored reading per measurement: `value`, `unit`, `status`,
+`value_since`, `confirmed_through`, the configured `range`, the `limits_now`
+in force (a night range may differ), and `in_range`.
+
+Only `status: ok` is a current reading. `stale` means this service has not
+confirmed the value within three sync intervals; `unavailable`, `unknown` and
+`no_record` come from Home Assistant. `in_range` is `null` whenever it cannot
+be judged — never "fine".
+
+### `home_sensor_history(sensor|zone, measurement="temperature", start_time, end_time, max_buckets=24)`
+
+One measurement over a period (default: the last 24 hours; a window reaching
+past now stops at now). Returns a `summary` (time-weighted mean, min/max with
+when), a `trend` in round-numbered buckets, `out_of_range` spans (start, end,
+direction, extreme, limit — `null` when no range is configured) and `unknown`
+spans with a reason. Unknown time is excluded from every number. See
+[sensors.md](sensors.md).
+
 ## Coverage: how a negative answer stays honest
 
 Any bounded, place-filtered query carries a `coverage` block, so a caller can

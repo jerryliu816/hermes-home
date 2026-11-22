@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from hermes_home.config import CamerasConfig, Settings
+from hermes_home.config import CamerasConfig, SensorsConfig, Settings
 from hermes_home.core.time import ensure_utc, now_utc, to_display_tz
 from hermes_home.domain.dto import (
     ActivitySummary,
@@ -28,6 +28,7 @@ from hermes_home.domain.dto import (
     HomeView,
     PipelineCoverageView,
     PipelineGapView,
+    SensorView,
     ZoneView,
 )
 from hermes_home.health.coverage import (
@@ -73,11 +74,17 @@ MAX_LIMIT = 200
 
 class EventService:
     def __init__(
-        self, session: AsyncSession, *, settings: Settings, cameras: CamerasConfig
+        self,
+        session: AsyncSession,
+        *,
+        settings: Settings,
+        cameras: CamerasConfig,
+        sensors: SensorsConfig | None = None,
     ) -> None:
         self._session = session
         self._settings = settings
         self._cameras = cameras
+        self._sensors = sensors or SensorsConfig()
         self._repo = EventRepository(session)
         self._health = CameraHealthRepository(session)
         self._gaps = DeliveryGapRepository(session)
@@ -179,6 +186,9 @@ class EventService:
                     adjacent_to=await adjacent_zone_keys(self._session, zone.key),
                     relations=await zone_relations(self._session, zone.key),
                     observed_by_cameras=cameras_observing(self._cameras, zone.key),
+                    sensors=sorted(
+                        k for k, s in self._sensors.sensors.items() if s.location == zone.key
+                    ),
                 )
             )
         return views
@@ -206,6 +216,16 @@ class EventService:
                     health_checked_at=(health[key].checked_at if key in health else None),
                 )
                 for key, camera in sorted(self._cameras.cameras.items())
+            ],
+            sensors=[
+                SensorView(
+                    key=key,
+                    name=sensor.name,
+                    aliases=list(sensor.aliases),
+                    located_in=sensor.location,
+                    measurements=sorted(sensor.measurements),
+                )
+                for key, sensor in sorted(self._sensors.sensors.items())
             ],
             unobserved_zones=sorted(z.key for z in zones if z.key not in covered),
             partially_observed_zones=sorted(zones_partially_covered_by(self._cameras)),

@@ -13,6 +13,7 @@ from hermes_home.config import (
     Settings,
     load_cameras_config,
     load_home_config,
+    validate_cameras_against_settings,
     validate_home_and_cameras,
 )
 from hermes_home.core.errors import ConfigError
@@ -283,6 +284,23 @@ def test_ollama_refuses_a_lease_shorter_than_the_worst_case_job() -> None:
     )
     assert ok.analysis_budget_seconds == 212
     ok.require_for_runtime()
+
+
+def test_a_per_camera_freshness_wait_must_fit_the_lease(cameras_config) -> None:
+    settings = _runtime(vision_timeout_seconds=90, ingest_lease_seconds=300)
+    # Nothing set: unchanged behaviour, nothing new enforced.
+    validate_cameras_against_settings(settings, cameras_config)
+
+    camera = next(iter(cameras_config.cameras.values()))
+    camera.freshness_wait_seconds = 75
+    assert settings.freshness_attempts_for(camera) == 75
+    # 75 + 2*90 + 2 + 15 = 272 < 300.
+    assert settings.analysis_budget_seconds_for(cameras_config) == 272
+    validate_cameras_against_settings(settings, cameras_config)
+
+    camera.freshness_wait_seconds = 120  # 317 > 300
+    with pytest.raises(ConfigError, match="INGEST_LEASE_SECONDS"):
+        validate_cameras_against_settings(settings, cameras_config)
 
 
 def test_the_lease_check_does_not_newly_constrain_anthropic() -> None:

@@ -526,6 +526,37 @@ async def test_gives_up_after_the_configured_budget(
         assert delivery.disposition == Disposition.REJECTED_STALE_IMAGE
 
 
+async def test_a_camera_can_wait_longer_than_the_global_budget(
+    session_factory, settings, cameras_config
+) -> None:
+    """Measured: the gecko camera publishes its still ~60s after every trigger.
+
+    The global wait (here, 2 polls) would reject that frame as stale. A camera
+    that sets freshness_wait_seconds keeps polling for its own budget instead.
+    """
+    settings.freshness_poll_attempts = 2
+    settings.freshness_poll_interval_seconds = 0.001
+    cameras_config.cameras["front_door"].freshness_wait_seconds = 0.02  # 20 polls
+
+    ha = FakeHomeAssistant(image_state_ts=now_utc())
+    await _enqueue(session_factory)
+    await _run_worker_once(session_factory, settings, cameras_config, ha)
+
+    # The next still lands on the 10th poll: past the global 2, inside the camera's 20.
+    ha.publish_on_call = ha.state_calls + 10
+    ha.pending_image = OTHER_IMAGE
+    ha.pending_state_ts = now_utc() + timedelta(seconds=30)
+    await _enqueue(session_factory, occurred_at=now_utc() + timedelta(seconds=30))
+    await _run_worker_once(session_factory, settings, cameras_config, ha)
+
+    async with session_scope(session_factory) as session:
+        assert await session.scalar(select(func.count()).select_from(Event)) == 2
+        delivery = await session.scalar(
+            select(EventDelivery).order_by(EventDelivery.id.desc()).limit(1)
+        )
+        assert delivery.disposition != Disposition.REJECTED_STALE_IMAGE
+
+
 async def test_stale_frame_rejected_even_when_history_has_no_timestamp(
     session_factory, settings, cameras_config
 ) -> None:

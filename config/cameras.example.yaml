@@ -31,6 +31,13 @@
 #   camera_snapshot     No freshness signal — take a snapshot from camera.* directly.
 #   none                Metadata-only event; no image is fetched or analyzed.
 #
+# freshness_wait_seconds (optional): how long to wait for THIS camera's event
+# still before rejecting it as stale. Defaults to the global
+# FRESHNESS_POLL_ATTEMPTS x FRESHNESS_POLL_INTERVAL_SECONDS (15s). Set it only
+# for a camera measured to publish late -- compare the trigger entity's history
+# with the image entity's in Home Assistant. The lease must still cover the
+# slowest camera; startup refuses a wait that does not fit.
+#
 # vision_context (optional):
 #   Free text appended to the base vision prompt for THIS camera only. Use it
 #   when a camera is not watching for the thing the base prompt assumes -- one

@@ -171,6 +171,7 @@ mcp/        MCP transport: server + tool definitions
 services/   read-side logic, shared by both transports so they cannot drift
 ingest/     pipeline, worker, dedupe, freshness, correlation, retention
 health/     camera health monitor, historical coverage algebra
+sensors/    sensor recorder (HA history -> sensor_states), step-function math, discovery
 storage/    models, engine, repositories, migrations
 clients/    outbound adapters (home_assistant; a future tesla.py is a peer)
 vision/     provider protocol, mock, anthropic, prompts

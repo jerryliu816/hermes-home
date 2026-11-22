@@ -1,0 +1,54 @@
+# Thermometers, hygrometers and anything else Home Assistant reports as a
+# number. Copy to config/sensors.yaml. The file is optional: without it, no
+# sensors are synced and nothing else changes.
+#
+# THE KEY OF EACH SENSOR IS PERMANENT. It is the join key for every stored
+# reading, so renaming it starts an empty history under the new key. Change
+# `name` or add `aliases` instead.
+#
+# Nothing here is specific to a brand. Any number of sensors, any make: a new
+# one is a Home Assistant pairing plus an entry below, then `make restart`. Its
+# history is backfilled from HA's recorder (SENSOR_BACKFILL_DAYS, default 10).
+# `make sensors-discover` lists HA's sensor entities and prints a stub for
+# every one not configured yet.
+#
+# measurements:
+#   Any lowercase name (temperature, humidity, battery, co2, ...), each backed
+#   by one HA entity whose state is a number.
+#
+#   unit (optional)   The unit ranges are written in and results reported in.
+#                     Defaults to what HA reports. Temperatures in another unit
+#                     are converted; other mismatches are treated as unknown.
+#   range (optional)  {min, max}; either side may be omitted.
+#   night (optional)  {from: "HH:MM", to: "HH:MM", min, max} in DISPLAY_TIMEZONE.
+#                     Replaces `range` between those times; may cross midnight.
+#                     Requires `range`.
+sensors:
+  enclosure:
+    name: Enclosure Thermometer
+    aliases: [tank thermometer]
+    location: gecko_enclosure          # a zone key from config/home.yaml
+    measurements:
+      temperature:
+        entity: sensor.enclosure_thermometer_temperature
+        unit: "°F"
+        range: {min: 72, max: 90}
+        night: {from: "21:00", to: "07:00", min: 62, max: 80}
+      humidity:
+        entity: sensor.enclosure_thermometer_humidity
+        range: {min: 30, max: 60}
+      battery:
+        entity: sensor.enclosure_thermometer_battery
+        range: {min: 20}
+
+  bedroom:
+    name: Bedroom Thermometer
+    location: bedroom
+    measurements:
+      temperature:
+        entity: sensor.bedroom_thermometer_temperature
+      humidity:
+        entity: sensor.bedroom_thermometer_humidity
+      battery:
+        entity: sensor.bedroom_thermometer_battery
+        range: {min: 20}

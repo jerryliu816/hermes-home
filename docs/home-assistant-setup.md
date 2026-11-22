@@ -215,6 +215,31 @@ garage_left:
   event_image_entity: image.driveway_event_image
 ```
 
+## Sensors (thermometers and the like)
+
+Sensors need **no automation and no `rest_command`**: hermes-home reads their
+history from HA's recorder with the token it already has.
+
+1. Pair the device in Home Assistant (a ThermoPro BLE thermometer appears on
+   its own via the Bluetooth integration).
+2. Optionally rename the device in HA (pencil icon on its device page) and let
+   HA rename its entity IDs — e.g. to `sensor.gecko_enclosure_temperature`.
+   Do this *before* adding it to hermes-home if you are going to; a rename
+   afterwards needs the `entity:` lines updated (history continues under the
+   same key).
+3. Leave it in the recorder (the default). HA's `purge_keep_days` does not need
+   to change: hermes-home keeps its own copy.
+4. Run `make sensors-discover`. It lists HA's temperature, humidity and battery
+   sensors, marks the configured ones, and prints a stub for the rest. Paste it
+   into `config/sensors.yaml`, choose a permanent key and a zone, then
+   `make restart`.
+5. Check silence on real hardware once: take the battery out and confirm the
+   entities go `unavailable` (for Bluetooth sensors HA does this after roughly
+   15 minutes without an advertisement). That transition is what hermes-home
+   records as a gap; a sensor that kept its last value would look steady.
+
+Details: [sensors.md](sensors.md).
+
 ## Supported `event_type` values
 
 `camera.motion`, `camera.person_detected`, `camera.vehicle_detected`,
