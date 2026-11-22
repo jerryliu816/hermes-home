@@ -13,6 +13,7 @@ it does not.
 | Anthropic API key | billable | `.env` only |
 | Webhook secret | authenticates event injection | `.env`, and HA's `secrets.yaml` |
 | Event history | a record of household activity and visitors | `data/hermes-home.db` |
+| Thermostat control | heating left off in winter, or run hard, costs comfort and money | `home_set_thermostat` |
 | Event images | pictures of people at the door | **not retained** |
 
 ## Trust boundaries
@@ -57,6 +58,20 @@ echoed to a terminal; the old value is rejected.
 in the allowlist gets 421. This matters because a browser on the LAN could
 otherwise be induced by a malicious page to reach the endpoint. Verified with a
 forged Host header.
+
+**Thermostat writes are bounded.** `home_set_thermostat` is the only MCP tool
+that changes a device. It is reachable only over the MCP endpoint, which is on
+the two bound addresses and protected against DNS rebinding.
+
+- It can reach only `climate.*` entities configured in `config/sensors.yaml`.
+- The HA client itself refuses any service other than `climate.set_temperature`,
+  `set_hvac_mode` and `set_preset_mode`.
+- Setpoints outside the configured limits are refused before HA is called.
+- Leaving `off` out of `modes` stops it turning the heating off.
+- Every attempt is written to `thermostat_changes`.
+
+What it does not stop is a caller choosing a bad value *inside* the limits, so
+set the limits to what you would accept from anyone on the LAN.
 
 **Request size limits.** Bodies over `WEBHOOK_MAX_BODY_BYTES` (64 KB) are
 rejected with 413 before parsing.
@@ -133,6 +148,9 @@ Stated plainly, because an unstated limitation is worse than a known one.
   permissions only; there is no encryption at rest. A user who can read the
   home directory has the HA token and can control the house.
 - **A compromised Home Assistant.** hermes-home trusts what HA tells it.
+- **An MCP client on this Mac or the LAN changing the thermostat** within its
+  configured limits. The MCP endpoint has no authentication of its own; its
+  protection is the interface binding and the Host allowlist.
 - **Denial of service.** An attacker who knows the secret can flood the queue.
   Retries are bounded and images are size-capped, but there is no rate limiting.
 - **Tampering with the database.** No integrity signing; anyone who can write

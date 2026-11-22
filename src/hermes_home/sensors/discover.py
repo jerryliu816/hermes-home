@@ -98,3 +98,39 @@ def stub(found: list[Candidate]) -> str:
             reading = f"{c.state} {c.unit}" if c.unit else c.state
             lines += [f"      {name}:", f"        entity: {c.entity_id}   # now {reading}"]
     return "\n".join(lines)
+
+
+def thermostat_stub(states: list[EntityState], sensors: SensorsConfig) -> str:
+    """YAML for ``climate.*`` entities no sensor sets yet: limits and history.
+
+    The setpoint limits printed are the device's own; narrow them to what the
+    house should allow before pasting.
+    """
+    configured = {s.thermostat.entity for s in sensors.thermostats().values() if s.thermostat}
+    lines: list[str] = []
+    for state in sorted(states, key=lambda s: s.entity_id):
+        if not state.entity_id.startswith("climate.") or state.entity_id in configured:
+            continue
+        a = state.attributes
+        key = _slug(state.entity_id.split(".", 1)[1])
+        modes = [m for m in a.get("hvac_modes") or [] if m in ("heat", "cool", "heat_cool", "off")]
+        lo, hi = a.get("min_temp", 60), a.get("max_temp", 80)
+        lines += [
+            f"  {key}:                # permanent key -- choose it now",
+            f"    name: {a.get('friendly_name') or key} Thermostat",
+            "    location: CHANGE_ME     # a zone key from config/home.yaml",
+            "    thermostat:",
+            f"      entity: {state.entity_id}   # now {state.state}, set to {a.get('temperature')}",
+            f"      setpoint: {{min: {lo}, max: {hi}}}   # device limits; narrow them",
+            f"      modes: [{', '.join(modes)}]",
+            "    measurements:",
+            "      setpoint:",
+            f"        entity: {state.entity_id}",
+            "        attribute: temperature",
+            '        unit: "°F"            # the thermostat\'s unit',
+            "      heating:",
+            f"        entity: {state.entity_id}",
+            "        attribute: hvac_action",
+            "        states: {heating: 1, idle: 0, off: 0, cooling: 0}",
+        ]
+    return "\n".join(lines)

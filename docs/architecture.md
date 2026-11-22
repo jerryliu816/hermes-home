@@ -9,7 +9,7 @@ between them.
 |---|---|---|
 | **Home Assistant** | device connectivity, entity state, deterministic automation | interpret anything |
 | **Hermes' HA tools** | *current* state, direct device interaction | remember |
-| **hermes-home** | persistent semantic memory, history, spatial topology, incidents, query primitives | reason in natural language |
+| **hermes-home** | persistent semantic memory, history, spatial topology, incidents, query primitives; guarded thermostat setting | reason in natural language |
 | **Hermes** | reasoning, synthesis, prose | talk to devices directly |
 
 hermes-home holds no vendor code. If every Eufy camera were replaced tomorrow,
@@ -18,6 +18,17 @@ what changes is entity IDs in `config/cameras.yaml`.
 Symmetrically, no natural-language reasoning lives here. Every MCP tool is
 deterministic; none calls a language model. The one place a model is used is
 turning a *picture* into structured fields, which is perception, not reasoning.
+
+hermes-home talks to devices in one place only. It sets the thermostat
+(`services/thermostat_service.py`), where it adds what a raw HA service call
+lacks:
+
+- configured setpoint limits and allowed modes;
+- refusal of requests the device would silently ignore;
+- confirmation by reading the device back;
+- an audit row per attempt.
+
+The HA client refuses every other write.
 
 ## Data flow
 

@@ -1,7 +1,7 @@
 # hermes-home
 
-Turns the cameras and sensors around a house into something you can ask
-questions of.
+Turns the cameras, thermometers and thermostat around a house into something
+you can ask questions of — and lets you set the thermostat while you are at it.
 
 ```
 You:     What happened at the front door?
@@ -26,6 +26,29 @@ the frame been too dark to tell, it would have been stored as *unknown* — a
 distinct value — and Hermes would have said it didn't know rather than reporting
 an all-clear. The confidence remark is volunteered unprompted, because every
 observation carries the provider, model and confidence that produced it.
+
+The same works for temperature and for the thermostat (an illustration; the
+values are made up):
+
+```
+You:     Was the gecko enclosure too cold last night?
+
+Hermes:  No. It stayed inside its night range (62–80 °F) all night: lowest
+         68.9 °F at 5:40 AM, averaging 71.2 °F. The thermometer reported
+         throughout, so there are no gaps in that.
+
+You:     It's chilly in here. Set the hallway to 68.
+
+Hermes:  Done. The Nest now reports heat mode with a setpoint of 68 °F (it was
+         65 °F) and is heating.
+```
+
+The first answer comes from `home_sensor_history(sensor="gecko_enclosure")`.
+It reports both how low the temperature went and whether the sensor was heard
+from the whole time, because a silent thermometer is not a warm one. The second
+comes from `home_set_thermostat(temperature=68)`. That tool refuses anything
+outside the setpoints you allow, and it reports "done" only after the
+thermostat itself shows the change.
 
 ## The problem
 
@@ -65,15 +88,55 @@ have to:
 4. **Throws the image away**, keeping the interpretation.
 5. **Files it in place and time**: which zone, which camera, what else was
    happening nearby.
-6. **Exposes it to an agent** as ten deterministic tools, so plain-language
+6. **Exposes it to an agent** as twelve deterministic tools, so plain-language
    questions become real queries against real observations — each answer
    carrying whether the cameras behind it were actually working.
 
-Alongside the cameras it keeps a record of **sensor readings** — thermometers,
-hygrometers, batteries, anything Home Assistant reports as a number — copied
-from HA's recorder, placed in zones, checked against target ranges (with an
-optional night range), and honest about the spans when a sensor went silent.
-See [docs/sensors.md](docs/sensors.md).
+### Temperature sensors
+
+Alongside the cameras, it keeps a record of **sensor readings**: thermometers,
+hygrometers, batteries, or anything else Home Assistant reports as a number.
+This house has two ThermoPro Bluetooth thermometers (the gecko enclosure and
+the bedroom), and any make works the same way.
+
+- **Pulled, not pushed.** Every minute it copies new readings from Home
+  Assistant's recorder. No HA automation is needed, and downtime loses nothing
+  HA still holds.
+- **Kept for a year**, where HA forgets after ten days. A newly added sensor
+  comes with up to ten days of history copied from HA.
+- **Placed and judged.** Each sensor is in a zone and can have a target range,
+  plus an optional night range that may cross midnight. History reports every
+  span spent outside the range.
+- **Honest about silence.** If a sensor dropped out, the span is reported as
+  *unknown* with a reason, and it is left out of every minimum, maximum and
+  average rather than filled in.
+
+Adding one is a pairing in HA, then `make sensors-discover` to paste a stub
+into `config/sensors.yaml`, then `make restart`. `make sensors-status` shows
+the latest reading of each. See [docs/sensors.md](docs/sensors.md).
+
+### Nest thermostat
+
+The Hallway Google Nest (`climate.hallway_hallway`, through HA's Nest
+integration) is a sensor like the others, with two additions:
+
+- **History.** Four measurements are recorded the same way as the
+  thermometers: `temperature`, `humidity`, `setpoint` (what it was set to), and
+  `heating`. `heating` is 1 while the heat runs and 0 otherwise, so its average
+  over a period is the share of time the heat was on. "How long did the heat
+  run last night?" is a `home_sensor_history` call.
+- **Control.** `home_thermostat_status` reads it live: mode, whether it is
+  heating now, setpoint, preset, and the latest changes.
+  `home_set_thermostat` sets a temperature, a low/high range in `heat_cool`,
+  the mode, or a preset such as eco.
+  - The guardrails are in `config/sensors.yaml`: setpoints only within your
+    limits (60–76 °F here) and only the modes you allow.
+  - It refuses a change the thermostat would silently ignore, such as a
+    setpoint while it is off or in eco, and says why.
+  - A change counts as made only when the thermostat reports it back.
+  - Every request, refused ones included, is recorded in `thermostat_changes`.
+
+`make thermostat-status` shows the same thing from the command line.
 
 ## What that buys you
 
@@ -145,9 +208,11 @@ is running, what it last analyzed, and with which model.
 
 ## What it is not
 
-It does not replace Home Assistant, control any device, or watch live video.
-It stores no footage. It answers questions about the past; current device state
-and control stay with Home Assistant, where they belong.
+It does not replace Home Assistant or watch live video, and apart from the
+thermostat it controls no device. It stores no footage. It answers questions
+about the past. Current device state and device control stay with Home
+Assistant, where they belong. The one exception is the thermostat, which it
+can set through one guarded tool (above).
 
 ## How the pieces fit
 
@@ -156,7 +221,8 @@ is the bit in the middle that neither of them should have to be: it turns camera
 events into structured, timestamped, located observations and keeps them.
 
 ```
-   Physical devices  (Eufy cameras, sensors, later a Powerwall)
+   Physical devices  (Eufy cameras, ThermoPro thermometers, Nest thermostat,
+          |           later a Powerwall)
           |
           v
    Home Assistant           device connectivity, entity state, automations
@@ -172,12 +238,19 @@ events into structured, timestamped, located observations and keeps them.
           |                 |       local Ollama, one at a time)    |
           |                 |     discard the image                 |
           |                 |     persist event + analysis          |
+          |                 |  sensor recorder (pulls HA history    |
+          |                 |     every minute: thermometers,       |
+          |                 |     thermostat setpoint + heating)    |
+          |                 |  thermostat control (checked against  |
+          |                 |     limits, climate.* calls to HA,    |
+          |                 |     read back, audited)               |
           |                 +---------------------------------------+
           |                              |
           |                              v
-          |                        SQLite  (events, analyses, zones, incidents)
+          |                        SQLite  (events, analyses, zones, incidents,
+          |                                 sensor history, thermostat changes)
           |                              |
-          |  MCP tools (read-only, semantic)
+          |  MCP tools (semantic; read-only except home_set_thermostat)
           v
    Hermes Agent             "What just happened at the front door?"
 ```
@@ -227,6 +300,7 @@ cp .env.example .env                     # HA URL + token, webhook secret
                                          # address — required, left blank)
 cp config/home.example.yaml config/home.yaml
 cp config/cameras.example.yaml config/cameras.yaml   # your entity IDs
+cp config/sensors.example.yaml config/sensors.yaml   # optional: thermometers, thermostat
 
 make start                               # build, migrate, run
 make status                              # container state + readiness
@@ -252,7 +326,27 @@ deterministic mock. Point it at a real model only when you are ready.
 
 Secrets and deployment settings live in `.env` (gitignored). The non-secret
 description of the house — zones, how they connect, which camera watches what —
-lives in `config/home.yaml` and `config/cameras.yaml`.
+lives in `config/home.yaml` and `config/cameras.yaml`. Thermometers and the
+thermostat live in `config/sensors.yaml`, which is optional: without it, nothing
+is synced and nothing can be set. A sensor's `thermostat:` block names the
+`climate.*` entity, the setpoint limits and the allowed modes:
+
+```yaml
+  hallway:
+    name: Hallway Thermostat
+    aliases: [thermostat, nest]
+    location: hallway
+    thermostat:
+      entity: climate.hallway_hallway
+      setpoint: {min: 60, max: 76}       # the only setpoints Hermes may choose
+      modes: [heat, cool, heat_cool, off]
+    measurements:
+      temperature: {entity: sensor.hallway_hallway_temperature, unit: "°F"}
+      humidity:    {entity: sensor.hallway_hallway_humidity}
+      setpoint:    {entity: climate.hallway_hallway, attribute: temperature, unit: "°F"}
+      heating:     {entity: climate.hallway_hallway, attribute: hvac_action,
+                    states: {heating: 1, idle: 0, off: 0, cooling: 0}}
+```
 
 Both are validated at startup. A camera pointing at a zone that does not exist
 fails immediately with the offending name, rather than at 3am on a real event.
@@ -438,6 +532,7 @@ model accepts it — that is what `hermes-home vision probe` is for.
 | [mcp-tools.md](docs/mcp-tools.md) | the tool contract Hermes depends on |
 | [home-assistant-setup.md](docs/home-assistant-setup.md) | automation and entity wiring |
 | [camera-event-images.md](docs/camera-event-images.md) | measured Eufy timing and resolution |
+| [sensors.md](docs/sensors.md) | thermometers and the thermostat: syncing, ranges, unknown spans, setting it safely |
 
 Notable tests: the end-to-end pipeline (`test_ingest_pipeline.py`), crash
 recovery and exactly-once semantics (`test_worker_recovery.py`), webhook
@@ -448,11 +543,15 @@ retry path (`test_ollama_pipeline.py`), and the provider-switch scripts
 
 ## MCP
 
-Hermes reaches the semantic history through ten deterministic tools —
+Hermes reaches the semantic history through twelve deterministic tools:
 `home_recent_events`, `home_search_events`, `home_get_event`, `home_list_zones`,
 `home_describe_home`, `home_summarize_activity`, `home_list_cameras`,
-`home_coverage`, `home_list_sensors`, `home_sensor_history`. None of them calls a language model, and none duplicates
-Hermes' existing Home Assistant tools. See [docs/mcp-tools.md](docs/mcp-tools.md).
+`home_coverage`, `home_list_sensors`, `home_sensor_history`,
+`home_thermostat_status`, `home_set_thermostat`. None of them calls a language
+model, and none is a passthrough to Home Assistant. `home_set_thermostat` is the
+only one that changes anything. It reaches only the configured thermostat,
+within its configured limits, and records every request. See
+[docs/mcp-tools.md](docs/mcp-tools.md).
 
 ```bash
 hermes mcp add hermes-home --url http://localhost:8099/mcp/
@@ -493,6 +592,11 @@ LAN address for Home Assistant — never `0.0.0.0`, and never to the internet.
   exception messages, and never returned in a response.
 - Request bodies are size-limited; headers are never persisted (they carry the
   secret).
+- The only write to a device is the thermostat. Home Assistant is called only
+  for `climate.*` entities configured as thermostats, and only through
+  `set_temperature`, `set_hvac_mode` or `set_preset_mode`. Setpoints must be
+  inside the configured limits, and every request is audited in
+  `thermostat_changes`.
 - Do not expose this service to the internet.
 
 ## Roadmap
@@ -507,5 +611,7 @@ LAN address for Home Assistant — never `0.0.0.0`, and never to the internet.
 - [x] Camera health and historical coverage
 - [x] Delivery reconciliation against Home Assistant
 - [x] Local vision with Ollama, switchable with one command
+- [x] Sensor history (ThermoPro thermometers): ranges, night ranges, honest gaps
+- [x] Nest thermostat: setpoint and heating history, guarded setting
 - [ ] Incident correlation across zones
 - [ ] Powerwall / energy events

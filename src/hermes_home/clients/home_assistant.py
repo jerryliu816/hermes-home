@@ -11,10 +11,16 @@ Three endpoints matter for v1:
 ``GET /api/camera_proxy/{entity}``   a live snapshot from a camera entity
 ``GET /api/image_proxy/{entity}``    the current bytes of an ``image.*`` entity
 ``GET /api/history/period/{start}``  recorded state changes for an entity
+``POST /api/services/climate/{svc}`` set a thermostat (the one write; see below)
 
 The last one is the important one. An ``image.*`` entity's *state* is an ISO 8601
 timestamp of when its image last changed, which is what lets us tell a fresh
 event still from the previous event's frame.
+
+Writes are confined to ``climate`` services, called only by the thermostat
+service after it has checked the request against ``config/sensors.yaml``. This
+client refuses any other domain, so a slip elsewhere cannot turn it into a
+general remote control for the house.
 
 The access token is never logged, never formatted into an exception message, and
 never returned in an error body.
@@ -40,6 +46,9 @@ logger = structlog.get_logger(__name__)
 # us, and an unavailable HA is a condition to record, not to retry forever.
 _MAX_ATTEMPTS = 3
 _BACKOFF_SECONDS = 0.5
+
+#: The services the thermostat may call. Nothing else is ever POSTed.
+_CLIMATE_SERVICES = frozenset({"set_temperature", "set_hvac_mode", "set_preset_mode"})
 
 
 @dataclass(frozen=True)
@@ -102,17 +111,24 @@ class HomeAssistantClient:
     # ----------------------------------------------------------------- #
 
     async def _get(self, path: str) -> httpx.Response:
-        """GET with bounded retry.
+        return await self._request("GET", path)
+
+    async def _request(
+        self, method: str, path: str, *, json: dict[str, Any] | None = None
+    ) -> httpx.Response:
+        """A request with bounded retry.
 
         Retries only transient conditions. A 401 means the token is wrong and
-        will still be wrong in half a second, so it fails immediately.
+        will still be wrong in half a second, so it fails immediately. The only
+        POSTs are climate service calls, which set an absolute value and so are
+        safe to repeat.
         """
         url = f"{self._base_url}{path}"
         last_error: HomeAssistantError | None = None
 
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
-                response = await self._client.get(url, headers=self._headers)
+                response = await self._client.request(method, url, headers=self._headers, json=json)
             except httpx.TimeoutException as exc:
                 last_error = HomeAssistantError(
                     "ha_timeout", f"timed out requesting {path}", retryable=True
@@ -262,6 +278,60 @@ class HomeAssistantClient:
                     continue
         history.sort(key=lambda item: item[0])
         return history
+
+    async def get_attribute_history(
+        self, entity_id: str, attribute: str, *, start: datetime, end: datetime | None = None
+    ) -> list[tuple[datetime, str]]:
+        """Recorded ``(changed_at, value)`` pairs for one attribute, oldest first.
+
+        Like :meth:`get_state_history`, but asks for full entries because an
+        attribute is not in a minimal response. Only changes to *this*
+        attribute are returned; an absent or null value reads ``"unknown"``,
+        and an unavailable entity reads ``"unavailable"``.
+        """
+        params = {"filter_entity_id": entity_id, "significant_changes_only": "0"}
+        if end is not None:
+            params["end_time"] = ensure_utc(end).isoformat()
+        path = f"/api/history/period/{ensure_utc(start).isoformat()}?{urlencode(params)}"
+
+        response = await self._get(path)
+        payload = response.json()
+        history: list[tuple[datetime, str]] = []
+        for series in payload or []:
+            for entry in series:
+                raw = entry.get("last_updated") or entry.get("last_changed")
+                if not raw:
+                    continue
+                try:
+                    at = parse_ha_timestamp(raw)
+                except (ValueError, TypeError):
+                    continue
+                if entry.get("state") == "unavailable":
+                    value = "unavailable"
+                else:
+                    attr = (entry.get("attributes") or {}).get(attribute)
+                    value = "unknown" if attr is None else str(attr)
+                history.append((at, value))
+        history.sort(key=lambda item: item[0])
+        collapsed: list[tuple[datetime, str]] = []
+        for at, value in history:
+            if not collapsed or collapsed[-1][1] != value:
+                collapsed.append((at, value))
+        return collapsed
+
+    async def call_climate_service(self, service: str, data: dict[str, Any]) -> None:
+        """Call ``climate.<service>``. The only call that changes anything."""
+        if service not in _CLIMATE_SERVICES:
+            raise HomeAssistantError(
+                "ha_service_refused", f"climate.{service} is not a permitted service"
+            )
+        entity_id = str(data.get("entity_id", ""))
+        if not entity_id.startswith("climate."):
+            raise HomeAssistantError(
+                "ha_service_refused", "a climate service may only target a climate.* entity"
+            )
+        await self._request("POST", f"/api/services/climate/{service}", json=data)
+        logger.info("ha.service.called", service=f"climate.{service}", entity_id=entity_id)
 
     async def ping(self) -> bool:
         """True when the API answers and our token is accepted."""

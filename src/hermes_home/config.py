@@ -607,6 +607,15 @@ class NightBounds(Bounds):
             raise ValueError("night 'from' and 'to' must differ")
 
 
+def _yaml_word(value: Any) -> Any:
+    """Undo YAML 1.1 reading a bare ``off`` / ``on`` as a boolean."""
+    if value is False:
+        return "off"
+    if value is True:
+        return "on"
+    return value
+
+
 class MeasurementConfig(BaseModel):
     """One quantity a sensor reports, backed by one Home Assistant entity."""
 
@@ -619,12 +628,89 @@ class MeasurementConfig(BaseModel):
     unit: str | None = None
     range: Bounds | None = None
     night: NightBounds | None = None
+    #: Read this attribute of ``entity`` instead of its state -- a thermostat's
+    #: setpoint (``temperature``) or what it is doing (``hvac_action``).
+    attribute: str | None = None
+    #: Text states as numbers, e.g. ``{heating: 1, idle: 0}``: the time-weighted
+    #: mean is then the share of time spent heating. A state not listed here is
+    #: stored as unknown, never as 0.
+    states: dict[str, float] | None = None
+
+    @field_validator("states", mode="before")
+    @classmethod
+    def _yaml_off(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {_yaml_word(k): v for k, v in value.items()}
+        return value
 
     def model_post_init(self, _context: Any) -> None:
         if "." not in self.entity:
             raise ValueError(f"entity {self.entity!r} is not a Home Assistant entity id")
         if self.night is not None and self.range is None:
             raise ValueError("a night range overrides a daytime range; set range as well")
+        if self.attribute is not None and self.unit is None and self.states is None:
+            # HA gives a unit for an entity's state, never for an attribute.
+            raise ValueError(
+                f"attribute {self.attribute!r} has no unit in Home Assistant; set unit "
+                "(or states, for a text attribute)"
+            )
+        if self.states is not None and not self.states:
+            raise ValueError("states, when given, must map at least one state")
+
+    @property
+    def source(self) -> str:
+        """The entity, or ``entity[attribute]``: what this measurement reads."""
+        return f"{self.entity}[{self.attribute}]" if self.attribute else self.entity
+
+
+class SetpointLimits(BaseModel):
+    """The setpoints Hermes may choose, both inclusive."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    min: float
+    max: float
+
+    def model_post_init(self, _context: Any) -> None:
+        if self.min > self.max:
+            raise ValueError(f"setpoint min {self.min} is above max {self.max}")
+
+
+#: Modes Home Assistant's climate domain defines.
+CLIMATE_MODES = ("off", "heat", "cool", "heat_cool", "auto", "dry", "fan_only")
+
+
+class ThermostatConfig(BaseModel):
+    """Makes a sensor settable: which ``climate.*`` entity, and within what.
+
+    These limits are the house's, and sit inside the device's own. A request
+    outside them is refused before Home Assistant is called.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity: str
+    setpoint: SetpointLimits
+    #: Modes Hermes may switch to. Omit ``off`` to stop it turning the heat off.
+    modes: list[str] = Field(default_factory=lambda: ["heat", "cool", "heat_cool", "off"])
+    #: Unit the limits are written in, and the device's unit.
+    unit: str = "°F"
+
+    @field_validator("modes", mode="before")
+    @classmethod
+    def _yaml_off(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return [_yaml_word(v) for v in value]
+        return value
+
+    def model_post_init(self, _context: Any) -> None:
+        if not self.entity.startswith("climate."):
+            raise ValueError(f"thermostat entity {self.entity!r} must be a climate.* entity")
+        for mode in self.modes:
+            if mode not in CLIMATE_MODES:
+                raise ValueError(
+                    f"thermostat mode {mode!r} is not one of {', '.join(CLIMATE_MODES)}"
+                )
 
 
 class SensorConfig(BaseModel):
@@ -642,6 +728,8 @@ class SensorConfig(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     location: str
     measurements: dict[str, MeasurementConfig]
+    #: Present only for a thermostat Hermes may set.
+    thermostat: ThermostatConfig | None = None
 
     def model_post_init(self, _context: Any) -> None:
         if not self.measurements:
@@ -665,6 +753,10 @@ class SensorsConfig(BaseModel):
             for key, sensor in sorted(self.sensors.items())
             for name, measurement in sorted(sensor.measurements.items())
         ]
+
+    def thermostats(self) -> dict[str, SensorConfig]:
+        """Sensors that can be set, by key."""
+        return {k: s for k, s in sorted(self.sensors.items()) if s.thermostat is not None}
 
 
 def load_sensors_config(config_dir: Path) -> SensorsConfig:
@@ -696,11 +788,11 @@ def validate_sensors(home: HomeConfig, sensors: SensorsConfig, cameras: CamerasC
             problems.append(f"sensor {key!r} location {sensor.location!r} is not a declared zone")
         for name, measurement in sensor.measurements.items():
             where = f"{key}.{name}"
-            if measurement.entity in seen:
+            if measurement.source in seen:
                 problems.append(
-                    f"entity {measurement.entity!r} is configured twice "
-                    f"({seen[measurement.entity]} and {where})"
+                    f"entity {measurement.source!r} is configured twice "
+                    f"({seen[measurement.source]} and {where})"
                 )
-            seen[measurement.entity] = where
+            seen[measurement.source] = where
     if problems:
         raise ConfigError("invalid sensor configuration:\n  - " + "\n  - ".join(problems))

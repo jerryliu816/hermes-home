@@ -9,8 +9,21 @@ facts.
 
 Hermes already owns Home Assistant's *current* state through its own
 `ha_get_state`, `ha_list_entities` and `ha_call_service` tools. Nothing here
-duplicates that. There is no entity passthrough, no service calls, no device
-control, no raw SQL, and no generic database access.
+duplicates that. There is no entity passthrough, no general service calls, no
+raw SQL, and no generic database access.
+
+**One exception: the thermostat.** `home_set_thermostat` changes a device, and
+it is guarded in ways a raw `ha_call_service` is not:
+
+- It can reach only `climate.*` entities configured as thermostats, and only
+  three climate services.
+- It accepts only setpoints inside the configured limits and modes on the
+  allowed list.
+- It refuses requests the device would silently ignore.
+- It reports success only when the device shows the change.
+- It records every attempt.
+
+See [sensors.md](sensors.md#thermostats).
 
 | Layer | Owns |
 |---|---|
@@ -130,7 +143,9 @@ Exactly one of `camera` / `zone`.
 Every configured sensor (or one, by key, name or alias; or those in a zone)
 with its latest stored reading per measurement: `value`, `unit`, `status`,
 `value_since`, `confirmed_through`, the configured `range`, the `limits_now`
-in force (a night range may differ), and `in_range`.
+in force (a night range may differ), and `in_range`. `kind` is `thermostat`
+for a thermostat (with its `thermostat_entity`) and `sensor` for a standalone
+thermometer, so "the thermostat's temperature" is never guessed from a name.
 
 Only `status: ok` is a current reading. `stale` means this service has not
 confirmed the value within three sync intervals; `unavailable`, `unknown` and
@@ -145,6 +160,26 @@ when), a `trend` in round-numbered buckets, `out_of_range` spans (start, end,
 direction, extreme, limit — `null` when no range is configured) and `unknown`
 spans with a reason. Unknown time is excluded from every number. See
 [sensors.md](sensors.md).
+
+### `home_thermostat_status(thermostat=None)`
+
+Each configured thermostat read live from Home Assistant: `now` (mode, action,
+setpoint or setpoint_low/high, current temperature and humidity, preset,
+fan_mode), `limits` (what may be set), `device` (its modes, presets and
+min/max), `history_measurements`, and the last few `recent_changes`. `now` is
+`null` when HA cannot be read or reports the device unavailable, with `status`
+saying which.
+
+### `home_set_thermostat(thermostat, temperature, low, high, mode, preset)`
+
+Changes the thermostat. `thermostat` may be omitted when only one is
+configured. `outcome` is `confirmed`, `unconfirmed`, `refused` (with
+`error_code` and `detail`; nothing was sent) or `failed`. `before` and `after`
+are the device's own state. `change_uid` identifies the audit row. Refusal
+codes are listed in [sensors.md](sensors.md#thermostats).
+
+Past thermostat behaviour is `home_sensor_history` with
+`measurement="temperature" | "humidity" | "setpoint" | "heating"`.
 
 ## Coverage: how a negative answer stays honest
 

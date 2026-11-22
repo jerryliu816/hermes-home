@@ -240,6 +240,24 @@ history from HA's recorder with the token it already has.
 
 Details: [sensors.md](sensors.md).
 
+## Thermostat (Google Nest)
+
+As with the sensors, there is no automation or `rest_command`. The same token
+reads its history and sets it.
+
+1. Add the Nest through HA's **Google Nest** integration. This needs Google's
+   Device Access project and a Google Cloud OAuth client; follow HA's Nest
+   documentation. The thermostat appears as a `climate.*` entity (here
+   `climate.hallway_hallway`), with temperature and humidity sensors.
+2. Run `make sensors-discover`. It prints a thermostat stub for each
+   unconfigured `climate.*` entity, with the device's own setpoint limits.
+   Narrow those to what Hermes may choose, add the temperature and humidity
+   sensors as measurements, put it in a zone, then `make restart`.
+3. Check with `make thermostat-status`. It should match the device page in HA.
+
+The token's user must be allowed to control the thermostat. An admin token,
+which this already is, can.
+
 ## Supported `event_type` values
 
 `camera.motion`, `camera.person_detected`, `camera.vehicle_detected`,

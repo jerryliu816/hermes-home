@@ -23,6 +23,22 @@
 #   night (optional)  {from: "HH:MM", to: "HH:MM", min, max} in DISPLAY_TIMEZONE.
 #                     Replaces `range` between those times; may cross midnight.
 #                     Requires `range`.
+#   attribute (opt.)  Read this attribute of the entity instead of its state,
+#                     e.g. a thermostat's setpoint (`temperature`). Needs `unit`
+#                     or `states`: HA gives no unit for an attribute.
+#   states (optional) Text states as numbers, e.g. {heating: 1, idle: 0}. The
+#                     time-weighted mean is then the share of time heating. A
+#                     state not listed is stored as unknown, never as 0.
+#
+# thermostat (optional): makes a sensor settable through home_set_thermostat.
+#   entity            A climate.* entity.
+#   setpoint          {min, max}: the only setpoints Hermes may choose. Keep them
+#                     inside the device's own limits; anything else is refused
+#                     before Home Assistant is called.
+#   modes             Modes Hermes may switch to (heat, cool, heat_cool, off).
+#                     Leave out `off` to stop it turning the heating off.
+#   unit              The unit the limits are in (default "°F").
+#   Every request, refused ones included, is kept in thermostat_changes.
 sensors:
   enclosure:
     name: Enclosure Thermometer
@@ -52,3 +68,26 @@ sensors:
       battery:
         entity: sensor.bedroom_thermometer_battery
         range: {min: 20}
+
+  hallway:
+    name: Hallway Thermostat
+    aliases: [thermostat]
+    location: hallway
+    thermostat:
+      entity: climate.hallway
+      setpoint: {min: 60, max: 76}
+      modes: [heat, cool, heat_cool, off]
+    measurements:
+      temperature:
+        entity: sensor.hallway_temperature
+        unit: "°F"
+      humidity:
+        entity: sensor.hallway_humidity
+      setpoint:                          # what it was set to
+        entity: climate.hallway
+        attribute: temperature
+        unit: "°F"
+      heating:                           # mean = share of time the heat ran
+        entity: climate.hallway
+        attribute: hvac_action
+        states: {heating: 1, idle: 0, off: 0, cooling: 0}

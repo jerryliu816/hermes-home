@@ -13,7 +13,7 @@ CONTAINER_DB := /data/hermes-home.db
         backup restore build test lint shell prune \
         db-shell db-shell-rw db-query db-check db-snapshot \
         vision-status vision-local vision-anthropic \
-        sensors-status sensors-discover
+        sensors-status sensors-discover thermostat-status
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -86,6 +86,9 @@ sensors-status:  ## Latest reading per sensor measurement and how far it is sync
 
 sensors-discover:  ## HA sensor entities, with a config stub for unconfigured ones
 	@$(COMPOSE) exec -T $(SERVICE) hermes-home sensors discover
+
+thermostat-status:  ## Live thermostat state from HA, its limits and recent changes
+	@$(COMPOSE) exec -T $(SERVICE) hermes-home thermostat status
 
 vision-local:  ## Switch camera analysis to the local Ollama model (CHECK=1: dry run)
 	@./scripts/vision.sh local $(if $(CHECK),--check)
