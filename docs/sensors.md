@@ -73,6 +73,14 @@ sensors:
   compared.
 - **Ranges** may be one-sided. `night` replaces `range` between two local
   clock times in `DISPLAY_TIMEZONE`, and may cross midnight.
+- **Attributes.** `attribute: temperature` reads that attribute of the entity
+  instead of its state, for example a thermostat's setpoint. HA gives no unit
+  for an attribute, so `unit` (or `states`) is required. Two measurements may
+  read different attributes of one entity.
+- **Text states.** `states: {heating: 1, idle: 0, off: 0}` turns text into
+  numbers. The time-weighted mean of a 0/1 measurement is the share of time it
+  was 1. A state not in the map is stored as `unknown`, never as 0. A bare
+  `off` in YAML parses as a boolean; it is read back as `"off"`.
 
 Adding a sensor: pair it in HA, `make sensors-discover`, paste the stub, choose
 a key and zone, `make restart`. Removing one stops syncing it; its rows stay
@@ -104,11 +112,86 @@ unknown or a non-number), `no_record` (HA held nothing), `before_record`
 (before this measurement's history begins), `not_yet_synced` (after the last
 sync), `unit_mismatch`.
 
+## Thermostats
+
+A thermostat is a sensor with a `thermostat:` block. In this house it is the
+Hallway Google Nest, `climate.hallway_hallway` through HA's Nest integration.
+Nothing in the code names Nest. Any HA `climate.*` entity works.
+
+```yaml
+  hallway:
+    name: Hallway Thermostat
+    aliases: [thermostat, nest, hallway]
+    location: hallway
+    thermostat:
+      entity: climate.hallway_hallway
+      setpoint: {min: 60, max: 76}     # what Hermes may set, inside the device's 50-90
+      modes: [heat, cool, heat_cool, off]   # leave out `off` to forbid turning it off
+    measurements:
+      temperature: {entity: sensor.hallway_hallway_temperature, unit: "°F"}
+      humidity:    {entity: sensor.hallway_hallway_humidity}
+      setpoint:    {entity: climate.hallway_hallway, attribute: temperature, unit: "°F"}
+      heating:     {entity: climate.hallway_hallway, attribute: hvac_action,
+                    states: {heating: 1, idle: 0, off: 0, cooling: 0}}
+```
+
+**History** works like any other sensor: `home_sensor_history(sensor="hallway",
+measurement=...)`. The `setpoint` reads as unknown while the thermostat is off
+or holding a `heat_cool` range, because it then has no single setpoint. Over a
+period, `heating`'s `summary.mean` is the share of the time the heat ran.
+
+**Which temperature is the thermostat's.** In `home_list_sensors` and
+`home_sensor_history`, every sensor carries `kind`: `thermostat` (with
+`thermostat_entity`) or `sensor`. The Nest's own temperature is the `hallway`
+entry; the ThermoPros are `sensor`.
+
+**Reading now.** `home_thermostat_status` reads live from HA: mode, action,
+setpoint or low/high, current temperature and humidity, preset, the limits,
+and the last five requested changes.
+
+**Setting.** `home_set_thermostat` takes any of `temperature`, `low` + `high`,
+`mode` and `preset`. Before anything is sent, it reads the thermostat and
+refuses, with a code and a reason:
+
+| Code | When |
+|---|---|
+| `out_of_limits` | a setpoint outside `setpoint` (or the device's own min/max, if tighter) |
+| `mode_not_allowed` / `mode_not_supported` | a mode not in `modes`, or not offered by the device |
+| `preset_not_supported` | a preset the device does not offer |
+| `mode_off` | a setpoint while the mode is (or would be) off: it would do nothing |
+| `preset_active` | a setpoint while a preset such as eco overrides it; add `preset="none"` |
+| `needs_range` / `needs_single` | a single setpoint in `heat_cool`, or low/high outside it |
+| `bad_range` | low not below high |
+| `nothing_to_change`, `thermostat_unavailable` | nothing asked for; HA reports the device unavailable |
+
+When several changes are requested, they are applied in this order: preset,
+then mode, then setpoint. The thermostat is then read back for up to 15
+seconds:
+
+- `confirmed` means it reports the change. A request that matches the current
+  state is also `confirmed`, and nothing is sent.
+- `unconfirmed` means HA accepted the call but the device has not reported it
+  yet. Nest goes through Google's cloud, so this can happen.
+- `refused` and `failed` (HA unreachable) mean nothing changed.
+
+`after` is always what the device says, not what was asked for.
+
+Every attempt is a row in `thermostat_changes` (request, outcome, before,
+after). It is kept indefinitely: it is small, and it is the answer to "who
+turned the heat down?".
+
+The HA client can POST only to `climate.set_temperature`, `set_hvac_mode` and
+`set_preset_mode`, and only for a `climate.*` entity. Any other call is
+refused in the client itself.
+
 ## Operations
 
 ```bash
 make sensors-status      # latest value, status, range verdict and sync point per measurement
 make sensors-discover    # HA sensor entities, with a stub for the unconfigured ones
+                         # (and a thermostat stub for each unconfigured climate.* entity)
+make thermostat-status   # live thermostat state, limits, recent changes
+make db-query SQL="SELECT requested_at, request, outcome, error_code FROM thermostat_changes ORDER BY id DESC LIMIT 10"
 make db-query SQL="SELECT sensor_key, measurement, count(*) FROM sensor_states GROUP BY 1, 2"
 ```
 

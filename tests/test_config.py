@@ -13,8 +13,10 @@ from hermes_home.config import (
     Settings,
     load_cameras_config,
     load_home_config,
+    load_sensors_config,
     validate_cameras_against_settings,
     validate_home_and_cameras,
+    validate_sensors,
 )
 from hermes_home.core.errors import ConfigError
 
@@ -41,6 +43,28 @@ def test_example_config_is_valid(tmp_path) -> None:
     # Second camera, added by configuration alone.
     assert cameras.cameras["garage_right"].event_image_entity
     assert cameras.cameras["garage_right"].location == "garage_entry"
+
+
+def test_example_sensors_config_is_valid(tmp_path) -> None:
+    """sensors.example.yaml, thermostat included, validates against the example home."""
+    import shutil
+
+    for name in ("home", "cameras", "sensors"):
+        shutil.copy(REPO_ROOT / "config" / f"{name}.example.yaml", tmp_path / f"{name}.yaml")
+    sensors = load_sensors_config(tmp_path)
+    validate_sensors(load_home_config(tmp_path), sensors, load_cameras_config(tmp_path))
+
+    hallway = sensors.sensors["hallway"]
+    assert hallway.thermostat is not None
+    # A bare `off` in YAML is a boolean; it must still mean the mode "off".
+    assert "off" in hallway.thermostat.modes
+    assert hallway.measurements["heating"].states == {
+        "heating": 1,
+        "idle": 0,
+        "off": 0,
+        "cooling": 0,
+    }
+    assert hallway.measurements["setpoint"].attribute == "temperature"
 
 
 def test_missing_config_file_is_explicit(tmp_path: Path) -> None:

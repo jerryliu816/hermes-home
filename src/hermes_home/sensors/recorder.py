@@ -51,13 +51,22 @@ _START_SLACK = timedelta(seconds=2)
 _PRUNE_EVERY = timedelta(hours=1)
 
 
-def classify(raw: str) -> tuple[float | None, str]:
-    """A Home Assistant state string as (value, status). Unknown is never 0."""
+def classify(raw: str, states: dict[str, float] | None = None) -> tuple[float | None, str]:
+    """A Home Assistant state string as (value, status). Unknown is never 0.
+
+    ``states`` maps text states to numbers. With it, a state it does not list
+    is unknown -- a thermostat reporting a mode nobody configured is not idle.
+    """
     text = raw.strip()
     lowered = text.lower()
     if lowered == "unavailable":
         return None, SensorStatus.UNAVAILABLE
     if lowered in ("unknown", "", "none"):
+        return None, SensorStatus.UNKNOWN
+    if states is not None:
+        mapped = {k.lower(): v for k, v in states.items()}
+        if lowered in mapped:
+            return float(mapped[lowered]), SensorStatus.OK
         return None, SensorStatus.UNKNOWN
     try:
         value = float(text)
@@ -174,9 +183,16 @@ class SensorRecorder:
                 return 0
 
             try:
-                state = await self._ha.get_entity_state(cfg.entity)
-                unit = state.attributes.get("unit_of_measurement")
-                history = await self._ha.get_state_history(cfg.entity, start=cursor, end=until)
+                if cfg.attribute is not None:
+                    # An attribute has no unit in HA; the configured one is it.
+                    unit = cfg.unit
+                    history = await self._ha.get_attribute_history(
+                        cfg.entity, cfg.attribute, start=cursor, end=until
+                    )
+                else:
+                    state = await self._ha.get_entity_state(cfg.entity)
+                    unit = state.attributes.get("unit_of_measurement")
+                    history = await self._ha.get_state_history(cfg.entity, start=cursor, end=until)
             except HomeAssistantError as exc:
                 # Our blindness, not the sensor's: write nothing about the
                 # sensor and leave the sync point where it is, so the next pass
@@ -187,7 +203,7 @@ class SensorRecorder:
 
             if unit is not None:
                 sync.unit = str(unit)[:32]
-            added = await self._store(repo, key, name, cursor, history, sync.unit)
+            added = await self._store(repo, key, name, cursor, history, sync.unit, cfg.states)
             sync.synced_through = until
             sync.last_success_at = moment
             sync.last_error = None
@@ -203,6 +219,7 @@ class SensorRecorder:
         cursor: datetime,
         history: list[tuple[datetime, str]],
         unit: str | None,
+        states: dict[str, float] | None = None,
     ) -> int:
         last = await repo.last_state(key, name)
         added = 0
@@ -235,7 +252,7 @@ class SensorRecorder:
                 add(cursor, None, SensorStatus.NO_RECORD, None)
 
         for at, raw in history:
-            value, status = classify(raw)
+            value, status = classify(raw, states)
             if changed(value, status):
                 add(max(at, cursor), value, status, raw)
         return added

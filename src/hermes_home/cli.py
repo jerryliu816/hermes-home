@@ -22,6 +22,10 @@ sensors_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(sensors_app, name="sensors")
+thermostat_app = typer.Typer(
+    help="Thermostats configured in config/sensors.yaml.", no_args_is_help=True
+)
+app.add_typer(thermostat_app, name="thermostat")
 
 
 def _alembic_config(settings: Settings):  # type: ignore[no-untyped-def]
@@ -237,10 +241,6 @@ def vision_probe(
         raise typer.Exit(1)
 
 
-if __name__ == "__main__":
-    app()
-
-
 @sensors_app.command("status")
 def sensors_status() -> None:
     """Latest stored reading per measurement, and how far each is synced.
@@ -267,7 +267,8 @@ def sensors_status() -> None:
             await engine.dispose()
 
     for sensor in asyncio.run(_run()):
-        typer.echo(f"{sensor['key']}  ({sensor['name']}, zone {sensor['zone']})")
+        kind = "thermostat, " if sensor["kind"] == "thermostat" else ""
+        typer.echo(f"{sensor['key']}  ({kind}{sensor['name']}, zone {sensor['zone']})")
         for name, m in sensor["measurements"].items():
             value = "-" if m["value"] is None else f"{m['value']} {m['unit'] or ''}".strip()
             flag = {True: "in range", False: "OUT OF RANGE", None: ""}[m["in_range"]]
@@ -290,7 +291,7 @@ def sensors_discover(
     """
     from hermes_home.clients.home_assistant import HomeAssistantClient
     from hermes_home.config import load_sensors_config
-    from hermes_home.sensors.discover import candidates, stub
+    from hermes_home.sensors.discover import candidates, stub, thermostat_stub
 
     settings = Settings()
     sensors = load_sensors_config(settings.config_dir)
@@ -303,7 +304,12 @@ def sensors_discover(
         ) as client:
             return await client.list_states()
 
-    found = candidates(asyncio.run(_run()), sensors, all_numeric=all_numeric)
+    states = asyncio.run(_run())
+    found = candidates(states, sensors, all_numeric=all_numeric)
+    climate = thermostat_stub(states, sensors)
+    if climate:
+        typer.echo("# Thermostats not configured yet; merge into the sensor for that room:\n")
+        typer.echo(climate + "\n")
     if not found:
         typer.echo("no matching sensor entities in Home Assistant")
         return
@@ -315,3 +321,74 @@ def sensors_discover(
     if text:
         typer.echo("\n# Paste under `sensors:` in config/sensors.yaml, then make restart:\n")
         typer.echo(text)
+
+
+@thermostat_app.command("status")
+def thermostat_status() -> None:
+    """Each thermostat's live state from Home Assistant, and its recent changes.
+
+    Read-only. Run it inside the container (make thermostat-status).
+    """
+    from hermes_home.clients.home_assistant import HomeAssistantClient
+    from hermes_home.config import load_sensors_config
+    from hermes_home.services.thermostat_service import ThermostatService
+    from hermes_home.storage.engine import create_engine, create_session_factory
+
+    settings = Settings()
+    sensors = load_sensors_config(settings.config_dir)
+    if not sensors.thermostats():
+        typer.echo("no thermostat configured (a sensor with a thermostat: block)")
+        return
+
+    async def _run() -> list[dict]:
+        engine = create_engine(settings.database_url)
+        try:
+            async with HomeAssistantClient(
+                settings.home_assistant_url,
+                settings.home_assistant_token,
+                timeout_seconds=settings.home_assistant_timeout_seconds,
+            ) as client:
+                svc = ThermostatService(
+                    session_factory=create_session_factory(engine),
+                    settings=settings,
+                    sensors=sensors,
+                    ha_client=client,
+                )
+                return [await svc.status(k) for k in sorted(sensors.thermostats())]
+        finally:
+            await engine.dispose()
+
+    for t in asyncio.run(_run()):
+        limits = t["limits"]
+        typer.echo(
+            f"{t['key']}  ({t['name']}, {t['entity']}, zone {t['zone']})  "
+            f"limits {limits['setpoint_min']:g}-{limits['setpoint_max']:g} {limits['unit']}, "
+            f"modes {', '.join(limits['modes'])}"
+        )
+        now = t.get("now")
+        if now is None:
+            typer.echo(
+                f"  status {t['status']}" + (f"  error {t['error']}" if t.get("error") else "")
+            )
+        else:
+            target = (
+                f"{now['setpoint']:g}"
+                if now["setpoint"] is not None
+                else f"{now['setpoint_low']}-{now['setpoint_high']}"
+                if now["setpoint_low"] is not None
+                else "-"
+            )
+            typer.echo(
+                f"  mode {now['mode']}  action {now['action']}  setpoint {target}  "
+                f"preset {now['preset']}  now {now['current_temperature']}"
+                f" / {now['current_humidity']}%"
+            )
+        for c in t["recent_changes"]:
+            typer.echo(
+                f"  {c['requested_at']}  {c['outcome']:<11} {c['request']}"
+                + (f"  {c['error_code']}" if c["error_code"] else "")
+            )
+
+
+if __name__ == "__main__":
+    app()

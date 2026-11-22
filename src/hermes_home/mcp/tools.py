@@ -4,7 +4,12 @@ Scope is deliberate. Hermes already owns Home Assistant's *current* state throug
 its own `ha_get_state` / `ha_list_entities` / `ha_call_service` tools, so nothing
 here duplicates them: no entity passthrough, no service calls, no raw SQL, no
 generic database access. What Hermes cannot get anywhere else is persistent
-semantic history, so that is exactly and only what this exposes.
+semantic history, so that is what this exposes.
+
+One exception: `home_set_thermostat`. It is not a passthrough -- it can reach
+only the ``climate.*`` entities configured as thermostats, only three climate
+services, only setpoints inside configured limits, and it records every request
+and reports what the device says afterwards. See services/thermostat_service.py.
 
 Everything here is deterministic. No tool calls a language model. Hermes does the
 reasoning and the prose; this hands it structured facts to reason over.
@@ -30,6 +35,7 @@ from hermes_home.core.time import ensure_utc, now_utc, parse_ha_timestamp, to_di
 from hermes_home.domain.dto import EventBrief
 from hermes_home.services.event_service import MAX_LIMIT, EventService
 from hermes_home.services.sensor_service import SensorService
+from hermes_home.services.thermostat_service import ThermostatService
 from hermes_home.spatial import cameras_observing, coverage_of
 from hermes_home.storage.engine import session_scope
 
@@ -270,7 +276,8 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "Call this FIRST for such questions - do not inspect Home Assistant, "
             "containers, the filesystem, or the desktop to answer them. This is stored "
             "history; for the CURRENT state of a device, or to control one, use your "
-            "Home Assistant tools instead.\n\n"
+            "Home Assistant tools instead (for the thermostat, home_thermostat_status "
+            "and home_set_thermostat).\n\n"
             "Call it with NO arguments (or camera/zone only) unless the user named a "
             "time period. The default window is 24 hours; narrowing it to an hour makes "
             "an ordinary 'what happened' question return nothing.\n\n"
@@ -690,6 +697,11 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "as current. in_range is null whenever it cannot be judged; never report "
             "null as fine. limits_now is the range in force at this moment (a night "
             "range may differ from the day one).\n\n"
+            "kind is thermostat for a thermostat (its own temperature and humidity, "
+            "plus setpoint and heating) and sensor for a standalone thermometer. When "
+            "the user asks about 'the thermostat', use the kind: thermostat entry; "
+            "for what it is set to or whether it is heating now, use "
+            "home_thermostat_status.\n\n"
             "For how a reading changed over time, or whether it left its range during "
             "a period, use home_sensor_history."
         ),
@@ -792,3 +804,100 @@ def register_tools(mcp: Any, state: AppState) -> None:
             returned=len(result_series),
         )
         return {"series": result_series, "query_context": context}
+
+    # ----------------------------------------------------------------- #
+    # Thermostat -- the one tool here that changes a device
+    # ----------------------------------------------------------------- #
+
+    def thermostat_service() -> ThermostatService:
+        # Built per call: at registration time the state may not exist yet.
+        return ThermostatService(
+            session_factory=state.session_factory,
+            settings=state.settings,
+            sensors=state.sensors,
+            ha_client=state.ha_client,
+        )
+
+    @tool(
+        name="home_thermostat_status",
+        title="Thermostat status",
+        description=(
+            "THE TOOL for 'what is the thermostat set to?', 'is the heat on?', 'what "
+            "mode is it in?'. Reads the thermostat live from Home Assistant: mode "
+            "(heat/cool/heat_cool/off), action (heating/cooling/idle/off - whether it "
+            "is running right now), setpoint (or setpoint_low/high in heat_cool), the "
+            "temperature and humidity it measures, preset (eco overrides the "
+            "setpoint), the limits Hermes may set within, and the last few changes "
+            "requested through home_set_thermostat.\n\n"
+            "For the PAST - how warm it was, what it was set to, how long the heat "
+            "ran - use home_sensor_history with the thermostat as sensor and "
+            "measurement temperature, humidity, setpoint or heating (heating's mean "
+            "is the fraction of the time the heat was running)."
+        ),
+    )
+    async def home_thermostat_status(
+        thermostat: Annotated[
+            str | None, Field(description="Thermostat key, name or alias; omit for all.")
+        ] = None,
+    ) -> dict[str, Any]:
+        thermostats = thermostat_service()
+        keys, error = thermostats.resolve(thermostat)
+        if error:
+            return {"count": 0, "thermostats": [], "error": error}
+        result = [await thermostats.status(k) for k in keys]
+        logger.info("mcp.home_thermostat_status", thermostat=thermostat, returned=len(result))
+        return {
+            "count": len(result),
+            "thermostats": result,
+            "query_context": _date_context(state, now_utc()),
+        }
+
+    @tool(
+        name="home_set_thermostat",
+        title="Set the thermostat",
+        description=(
+            "CHANGES the thermostat. Only do this when the user has asked for the "
+            "change. Give any of: temperature (a single setpoint, in heat or cool "
+            "mode), low and high (in heat_cool mode), mode (heat, cool, heat_cool, "
+            "off, as allowed), preset (e.g. 'none' to leave eco). They may be "
+            "combined, e.g. mode='heat' with temperature=68.\n\n"
+            "Requests outside the configured limits, or that the thermostat would "
+            "ignore (a setpoint while it is off or in eco), are REFUSED with the "
+            "reason and nothing is sent - tell the user why, and do not retry with a "
+            "different value they did not ask for.\n\n"
+            "outcome is confirmed (the thermostat now reports the change), "
+            "unconfirmed (accepted but not yet reported - say so; do not claim it "
+            "worked), refused, or failed. `after` is what the thermostat reports, "
+            "not what was asked for. Every request is recorded."
+        ),
+    )
+    async def home_set_thermostat(
+        thermostat: Annotated[
+            str | None,
+            Field(description="Thermostat key, name or alias. May be omitted if there is one."),
+        ] = None,
+        temperature: Annotated[
+            float | None, Field(description="Single setpoint, in the thermostat's unit.")
+        ] = None,
+        low: Annotated[float | None, Field(description="heat_cool: heat to at least this.")] = None,
+        high: Annotated[float | None, Field(description="heat_cool: cool to at most this.")] = None,
+        mode: Annotated[str | None, Field(description="heat, cool, heat_cool or off.")] = None,
+        preset: Annotated[
+            str | None, Field(description="A preset the thermostat supports, e.g. eco or none.")
+        ] = None,
+    ) -> dict[str, Any]:
+        thermostats = thermostat_service()
+        keys, error = thermostats.resolve(thermostat)
+        if error:
+            return {"outcome": "refused", "changed": False, "error": error}
+        if len(keys) > 1:
+            return {
+                "outcome": "refused",
+                "changed": False,
+                "error": "more than one thermostat; name one of " + ", ".join(keys),
+            }
+        result = await thermostats.set(
+            keys[0], temperature=temperature, low=low, high=high, mode=mode, preset=preset
+        )
+        result["query_context"] = _date_context(state, now_utc())
+        return result

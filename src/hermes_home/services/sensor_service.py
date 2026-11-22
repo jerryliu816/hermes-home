@@ -113,7 +113,18 @@ class SensorService:
         return out
 
     def _header(self, key: str, cfg: SensorConfig) -> dict[str, Any]:
-        return {"key": key, "name": cfg.name, "aliases": list(cfg.aliases), "zone": cfg.location}
+        # `kind` says which temperature is a thermostat's own reading, so a
+        # reader never has to infer it from a name. A thermostat's setpoint
+        # and live state come from home_thermostat_status.
+        thermostat = cfg.thermostat
+        return {
+            "key": key,
+            "name": cfg.name,
+            "aliases": list(cfg.aliases),
+            "zone": cfg.location,
+            "kind": "thermostat" if thermostat else "sensor",
+            "thermostat_entity": thermostat.entity if thermostat else None,
+        }
 
     async def _current_measurement(
         self, key: str, name: str, cfg: MeasurementConfig, now: datetime

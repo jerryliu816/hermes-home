@@ -557,6 +557,9 @@ async def test_list_sensors_reports_value_unit_and_range(sensor_mcp, sensor_stat
     # A measurement HA has never reported is not in range, out of range or zero.
     battery = by_key["tank"]["measurements"]["battery"]
     assert battery["value"] is None and battery["in_range"] is None
+    # A plain thermometer says so, rather than leaving a reader to guess.
+    assert by_key["tank"]["kind"] == "sensor"
+    assert by_key["tank"]["thermostat_entity"] is None
     assert "query_context" in out
 
 

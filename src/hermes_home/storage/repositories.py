@@ -31,6 +31,7 @@ from hermes_home.storage.models import (
     Incident,
     SensorState,
     SensorSyncState,
+    ThermostatChange,
 )
 
 
@@ -686,3 +687,25 @@ class SensorRepository:
             delete(SensorState).where(SensorState.started_at < cutoff)
         )
         return int(result.rowcount or 0)
+
+
+class ThermostatRepository:
+    """The audit trail of requests to set a thermostat."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    def add(self, row: ThermostatChange) -> None:
+        self._session.add(row)
+
+    async def recent(self, sensor_key: str, *, limit: int = 5) -> list[ThermostatChange]:
+        return list(
+            (
+                await self._session.scalars(
+                    select(ThermostatChange)
+                    .where(ThermostatChange.sensor_key == sensor_key)
+                    .order_by(ThermostatChange.requested_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+        )

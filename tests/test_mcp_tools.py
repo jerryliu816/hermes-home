@@ -30,6 +30,8 @@ EXPECTED_TOOLS = {
     "home_coverage",
     "home_list_sensors",
     "home_sensor_history",
+    "home_thermostat_status",
+    "home_set_thermostat",
 }
 
 
@@ -117,6 +119,13 @@ async def test_no_home_assistant_passthrough_is_exposed(mcp_server) -> None:
     forbidden = {"ha_get_state", "ha_list_entities", "ha_call_service", "get_entity_state"}
     assert names & forbidden == set()
     assert not any("sql" in n.lower() or "query_db" in n.lower() for n in names)
+
+
+async def test_the_only_tool_that_changes_a_device_is_the_thermostat(mcp_server) -> None:
+    """One documented exception to read-only; a new one must be a deliberate choice."""
+    names = {t.name for t in await mcp_server.list_tools()}
+    writers = {n for n in names if any(w in n for w in ("set_", "call", "control", "turn"))}
+    assert writers == {"home_set_thermostat"}
 
 
 async def test_every_tool_is_described_for_a_model(mcp_server) -> None:

@@ -23,6 +23,7 @@ Everything needed to run hermes-home day to day. `make help` lists the commands.
 | Vision status | `make vision-status` |
 | Sensor readings and sync | `make sensors-status` |
 | Find HA sensors to configure | `make sensors-discover` |
+| Thermostat state, limits, recent changes | `make thermostat-status` |
 | Switch to local model | `make vision-local` (`CHECK=1` for a dry run) |
 | Switch to Anthropic | `make vision-anthropic` (`CHECK=1` for a dry run) |
 
