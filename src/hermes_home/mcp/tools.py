@@ -29,6 +29,7 @@ from hermes_home.api.deps import AppState
 from hermes_home.core.time import ensure_utc, now_utc, parse_ha_timestamp, to_display_tz
 from hermes_home.domain.dto import EventBrief
 from hermes_home.services.event_service import MAX_LIMIT, EventService
+from hermes_home.services.sensor_service import SensorService
 from hermes_home.spatial import cameras_observing, coverage_of
 from hermes_home.storage.engine import session_scope
 
@@ -83,6 +84,18 @@ def _long_date(value: datetime) -> str:
     return f"{value:%A} {value.day} {value:%B %Y}"
 
 
+def _date_context(state: AppState, now: datetime) -> dict[str, Any]:
+    """What today is, where the reader is. Shared by every query_context."""
+    tz = state.settings.display_timezone
+    local_now = to_display_tz(now, tz)
+    return {
+        "now_utc": now.isoformat(),
+        "now_local": local_now.isoformat(),
+        "today": _long_date(local_now),
+        "timezone": tz,
+    }
+
+
 async def _query_context(
     svc: EventService,
     state: AppState,
@@ -105,13 +118,9 @@ async def _query_context(
     """
     tz = state.settings.display_timezone
     now = now_utc()
-    local_now = to_display_tz(now, tz)
     first_event, health_from = await svc.history_start()
     context: dict[str, Any] = {
-        "now_utc": now.isoformat(),
-        "now_local": local_now.isoformat(),
-        "today": _long_date(local_now),
-        "timezone": tz,
+        **_date_context(state, now),
         "first_event_at": first_event.isoformat() if first_event else None,
         "health_tracking_from": health_from.isoformat() if health_from else None,
     }
@@ -221,7 +230,12 @@ def register_tools(mcp: Any, state: AppState) -> None:
     """Attach every tool to ``mcp``, closing over the shared application state."""
 
     def service(session: Any) -> EventService:
-        return EventService(session, settings=state.settings, cameras=state.cameras)
+        return EventService(
+            session, settings=state.settings, cameras=state.cameras, sensors=state.sensors
+        )
+
+    def sensor_service(session: Any) -> SensorService:
+        return SensorService(session, settings=state.settings, sensors=state.sensors)
 
     def tool(**kwargs: Any) -> Any:
         """``mcp.tool``, with every result sent as compact JSON."""
@@ -242,7 +256,7 @@ def register_tools(mcp: Any, state: AppState) -> None:
         title="Recent home events",
         description=(
             "THE DEFAULT TOOL for any question about what has happened around the home. "
-            "Returns stored camera and sensor observations, newest first, with what was "
+            "Returns stored camera observations, newest first, with what was "
             "seen in each: a one-line summary, tags and the person/vehicle/animal/package "
             "counts. For every field of one event's analysis, call home_get_event with "
             "its uid. A long list is cut to stay small; `truncated` then says how many "
@@ -251,6 +265,8 @@ def register_tools(mcp: Any, state: AppState) -> None:
             "happened recently?', 'Who or what was detected?', 'Did anyone come to the "
             "house?', 'Was a package delivered?', 'What happened while I was away?', "
             "'What camera activity occurred?'\n\n"
+            "NOT for temperature, humidity or other sensor readings: use "
+            "home_list_sensors (now) or home_sensor_history (past) for those.\n\n"
             "Call this FIRST for such questions - do not inspect Home Assistant, "
             "containers, the filesystem, or the desktop to answer them. This is stored "
             "history; for the CURRENT state of a device, or to control one, use your "
@@ -653,3 +669,126 @@ def register_tools(mcp: Any, state: AppState) -> None:
             ),
         )
         return result
+
+    # ----------------------------------------------------------------- #
+    # Sensors
+    # ----------------------------------------------------------------- #
+
+    @tool(
+        name="home_list_sensors",
+        title="Current sensor readings",
+        description=(
+            "THE TOOL for any temperature, humidity or battery question. Every "
+            "thermometer and other sensor, where it is, and its LATEST reading per "
+            "measurement (temperature, humidity, battery...), with the configured target "
+            "range and whether the reading is in it. Use for 'how warm is the gecko "
+            "enclosure?', 'what's the bedroom humidity?', 'do any sensor batteries need "
+            "changing?', 'are all the temperatures OK?'\n\n"
+            "status is ok | unavailable | unknown | no_record | stale | never_synced. "
+            "Only ok is a current reading. stale means this service has not confirmed "
+            "the value recently - report the value with its confirmed_through time, not "
+            "as current. in_range is null whenever it cannot be judged; never report "
+            "null as fine. limits_now is the range in force at this moment (a night "
+            "range may differ from the day one).\n\n"
+            "For how a reading changed over time, or whether it left its range during "
+            "a period, use home_sensor_history."
+        ),
+    )
+    async def home_list_sensors(
+        sensor: Annotated[
+            str | None, Field(description="Sensor key, name or alias; omit for all.")
+        ] = None,
+        zone: Annotated[str | None, Field(description="Only sensors in this zone key.")] = None,
+    ) -> dict[str, Any]:
+        async with session_scope(state.session_factory) as session:
+            svc = sensor_service(session)
+            keys, error = svc.resolve(sensor=sensor, zone=zone)
+            if error:
+                return {"count": 0, "sensors": [], "error": error}
+            sensors = await svc.current(keys)
+        logger.info("mcp.home_list_sensors", returned=len(sensors), sensor=sensor, zone=zone)
+        return {
+            "count": len(sensors),
+            "sensors": sensors,
+            "query_context": _date_context(state, now_utc()),
+        }
+
+    @tool(
+        name="home_sensor_history",
+        title="Sensor history",
+        description=(
+            "How one measurement (default temperature) of a sensor behaved over a past "
+            "period: lowest and highest with when, time-weighted average, a trend in "
+            "round-numbered buckets, every span OUTSIDE its target range (start, end, "
+            "how far out), and every span where the value is NOT KNOWN. Use for 'was the "
+            "gecko enclosure ever too cold last night?', 'how warm did the bedroom get "
+            "this week?', 'when did the humidity drop?'\n\n"
+            "Defaults to the last 24 hours. Times are ISO 8601 with a UTC offset; "
+            "results are in local time.\n\n"
+            "Unknown time is excluded from every number and listed under `unknown` with "
+            "a reason (unavailable: Home Assistant lost the sensor; no_record: nothing "
+            "was recorded; before_record: before history begins; not_yet_synced). An "
+            "out_of_range list that is empty while unknown has spans means 'in range "
+            "whenever it was known', not 'in range throughout' - say so. "
+            "out_of_range is null when no target range is configured."
+        ),
+    )
+    async def home_sensor_history(
+        sensor: Annotated[
+            str | None, Field(description="Sensor key, name or alias. One of sensor/zone.")
+        ] = None,
+        zone: Annotated[
+            str | None, Field(description="Zone key: every sensor located there.")
+        ] = None,
+        measurement: Annotated[
+            str, Field(description="e.g. temperature, humidity, battery.")
+        ] = "temperature",
+        start_time: Annotated[
+            str | None, Field(description="ISO 8601. Defaults to 24 hours before end_time.")
+        ] = None,
+        end_time: Annotated[str | None, Field(description="ISO 8601. Defaults to now.")] = None,
+        max_buckets: Annotated[int, Field(ge=1, le=96)] = 24,
+    ) -> dict[str, Any]:
+        now = now_utc()
+        end = _parse_time(end_time, field="end_time") or now
+        start = _parse_time(start_time, field="start_time") or (end - timedelta(hours=24))
+        if start >= end:
+            raise ValueError("start_time must be before end_time")
+        # The future is not unknown, it has not happened: stop the window at now
+        # rather than reporting the rest of it as a gap in the record.
+        clamped = end > now
+        end = min(end, now)
+        if start >= end:
+            return {"error": "the whole period is in the future", "series": []}
+        if (sensor is None) == (zone is None):
+            return {"error": "give exactly one of sensor or zone", "series": []}
+
+        async with session_scope(state.session_factory) as session:
+            svc = sensor_service(session)
+            keys, error = svc.resolve(sensor=sensor, zone=zone)
+            if error:
+                return {"error": error, "series": []}
+            result_series = await svc.history(
+                keys, measurement, start=start, end=end, max_buckets=max_buckets
+            )
+        context = _date_context(state, now)
+        context["start"] = to_display_tz(start, state.settings.display_timezone).isoformat()
+        context["end"] = to_display_tz(end, state.settings.display_timezone).isoformat()
+        if clamped:
+            context["end_clamped_to_now"] = True
+        begins = [s["record_begins_at"] for s in result_series if s.get("record_begins_at")]
+        if result_series and len(begins) < len(result_series):
+            context["note"] = "Some sensors have no recorded history yet."
+        elif begins and all(parse_ha_timestamp(b) >= ensure_utc(end) for b in begins):
+            context["note"] = (
+                f"This period ends before sensor history begins ({min(begins)}). Today is "
+                f"{context['today']}. If a recent period was meant, check the year and date."
+            )
+        logger.info(
+            "mcp.home_sensor_history",
+            sensor=sensor,
+            zone=zone,
+            measurement=measurement,
+            returned=len(result_series),
+        )
+        return {"series": result_series, "query_context": context}

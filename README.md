@@ -65,9 +65,15 @@ have to:
 4. **Throws the image away**, keeping the interpretation.
 5. **Files it in place and time**: which zone, which camera, what else was
    happening nearby.
-6. **Exposes it to an agent** as eight deterministic tools, so plain-language
+6. **Exposes it to an agent** as ten deterministic tools, so plain-language
    questions become real queries against real observations — each answer
    carrying whether the cameras behind it were actually working.
+
+Alongside the cameras it keeps a record of **sensor readings** — thermometers,
+hygrometers, batteries, anything Home Assistant reports as a number — copied
+from HA's recorder, placed in zones, checked against target ranges (with an
+optional night range), and honest about the spans when a sensor went silent.
+See [docs/sensors.md](docs/sensors.md).
 
 ## What that buys you
 
@@ -442,10 +448,10 @@ retry path (`test_ollama_pipeline.py`), and the provider-switch scripts
 
 ## MCP
 
-Hermes reaches the semantic history through eight deterministic tools —
+Hermes reaches the semantic history through ten deterministic tools —
 `home_recent_events`, `home_search_events`, `home_get_event`, `home_list_zones`,
 `home_describe_home`, `home_summarize_activity`, `home_list_cameras`,
-`home_coverage`. None of them calls a language model, and none duplicates
+`home_coverage`, `home_list_sensors`, `home_sensor_history`. None of them calls a language model, and none duplicates
 Hermes' existing Home Assistant tools. See [docs/mcp-tools.md](docs/mcp-tools.md).
 
 ```bash

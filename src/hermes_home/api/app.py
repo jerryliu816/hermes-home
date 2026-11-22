@@ -21,13 +21,16 @@ from hermes_home.config import (
     Settings,
     load_cameras_config,
     load_home_config,
+    load_sensors_config,
     validate_cameras_against_settings,
     validate_home_and_cameras,
+    validate_sensors,
 )
 from hermes_home.health.monitor import CameraHealthMonitor
 from hermes_home.health.reconcile import DeliveryReconciler
 from hermes_home.ingest.worker import IngestWorker
 from hermes_home.observability.logging import configure_logging
+from hermes_home.sensors.recorder import SensorRecorder
 from hermes_home.spatial import seed_home
 from hermes_home.storage.engine import (
     create_engine,
@@ -49,6 +52,8 @@ async def build_state(settings: Settings, *, start_worker: bool = True) -> AppSt
     cameras = load_cameras_config(settings.config_dir)
     validate_home_and_cameras(home, cameras)
     validate_cameras_against_settings(settings, cameras)
+    sensors = load_sensors_config(settings.config_dir)
+    validate_sensors(home, sensors, cameras)
 
     engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)
@@ -74,6 +79,7 @@ async def build_state(settings: Settings, *, start_worker: bool = True) -> AppSt
         settings=settings,
         home=home,
         cameras=cameras,
+        sensors=sensors,
         engine=engine,
         session_factory=session_factory,
         ha_client=HomeAssistantClient(
@@ -123,6 +129,12 @@ async def build_state(settings: Settings, *, start_worker: bool = True) -> AppSt
             cameras=cameras,
             ha_client=state.ha_client,
         )
+        state.sensor_recorder = SensorRecorder(
+            session_factory=session_factory,
+            settings=settings,
+            sensors=sensors,
+            ha_client=state.ha_client,
+        )
     return state
 
 
@@ -140,6 +152,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await state.health_monitor.start()
         if state.reconciler is not None:
             await state.reconciler.start()
+        if state.sensor_recorder is not None:
+            await state.sensor_recorder.start()
 
         state.mcp_mounted = bool(getattr(app.state, "mcp_mounted", False))
         mcp = getattr(app.state, "mcp_server", None)
@@ -148,6 +162,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             vision_provider=settings.vision_provider,
             vision_model=settings.vision_model if settings.vision_provider != "mock" else None,
             cameras=sorted(state.cameras.cameras),
+            sensors=sorted(state.sensors.sensors),
             mcp_enabled=mcp is not None,
         )
         try:
@@ -160,6 +175,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 async with mcp.session_manager.run():
                     yield
         finally:
+            if state.sensor_recorder is not None:
+                await state.sensor_recorder.stop()
             if state.reconciler is not None:
                 await state.reconciler.stop()
             if state.health_monitor is not None:

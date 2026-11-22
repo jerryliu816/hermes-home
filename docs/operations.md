@@ -21,6 +21,8 @@ Everything needed to run hermes-home day to day. `make help` lists the commands.
 | SQL shell | `make db-shell` |
 | Shell in container | `make shell` |
 | Vision status | `make vision-status` |
+| Sensor readings and sync | `make sensors-status` |
+| Find HA sensors to configure | `make sensors-discover` |
 | Switch to local model | `make vision-local` (`CHECK=1` for a dry run) |
 | Switch to Anthropic | `make vision-anthropic` (`CHECK=1` for a dry run) |
 

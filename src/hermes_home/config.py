@@ -149,6 +149,21 @@ class Settings(BaseSettings):
         """
         return max(self.camera_health_interval_seconds * 3, 180)
 
+    # Sensor readings (thermometers and the like, from config/sensors.yaml).
+    # Pulled from Home Assistant's recorder rather than pushed, so an outage of
+    # this service shorter than HA's own retention loses nothing.
+    sensor_sync_enabled: bool = True
+    sensor_sync_interval_seconds: int = Field(default=60, ge=15, le=3600)
+    #: How far back a never-synced measurement is filled from HA's recorder.
+    #: HA keeps 10 days by default; asking for more just finds nothing older.
+    sensor_backfill_days: int = Field(default=10, ge=0, le=60)
+    sensor_retention_days: int = Field(default=365, ge=1)
+
+    @property
+    def sensor_stale_after_seconds(self) -> float:
+        """When a sensor's synced record stops being believable as current."""
+        return max(self.sensor_sync_interval_seconds * 3, 180)
+
     # Freshness gate. Measured on real Eufy hardware: the event still lands on
     # the image entity ~3.7s after the detection trigger fires, so the budget
     # (attempts x interval) must comfortably exceed that. 15s by default.
@@ -545,3 +560,147 @@ def validate_cameras_against_settings(settings: Settings, cameras: CamerasConfig
             "a slow job would be reclaimed and processed twice. Raise the lease or "
             "shorten the wait."
         )
+
+
+# --------------------------------------------------------------------------- #
+# Sensors (non-secret YAML, optional)
+# --------------------------------------------------------------------------- #
+
+#: Sensor keys and measurement names. Lowercase slugs, because both are join
+#: keys in the database and appear verbatim in MCP results.
+_SLUG = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_CLOCK = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+class Bounds(BaseModel):
+    """An acceptable band. Either side may be open."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    min: float | None = None
+    max: float | None = None
+
+    def model_post_init(self, _context: Any) -> None:
+        if self.min is None and self.max is None:
+            raise ValueError("a range needs at least one of min or max")
+        if self.min is not None and self.max is not None and self.min > self.max:
+            raise ValueError(f"range min {self.min} is above max {self.max}")
+
+
+class NightBounds(Bounds):
+    """A band that replaces the daytime range between two local clock times.
+
+    Many targets legitimately differ at night -- a reptile enclosure is meant to
+    cool off -- and a single range would report that as a fault every evening.
+    ``from`` may be later than ``to``; the window then crosses midnight.
+    """
+
+    from_time: str = Field(alias="from")
+    to_time: str = Field(alias="to")
+
+    def model_post_init(self, _context: Any) -> None:
+        super().model_post_init(_context)
+        for value in (self.from_time, self.to_time):
+            if not _CLOCK.match(value):
+                raise ValueError(f"night times must be HH:MM (24h), got {value!r}")
+        if self.from_time == self.to_time:
+            raise ValueError("night 'from' and 'to' must differ")
+
+
+class MeasurementConfig(BaseModel):
+    """One quantity a sensor reports, backed by one Home Assistant entity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity: str
+    #: The unit ranges are written in and results are reported in. Omit to use
+    #: whatever Home Assistant reports. Temperatures in another unit are
+    #: converted; any other mismatch is treated as unknown rather than compared.
+    unit: str | None = None
+    range: Bounds | None = None
+    night: NightBounds | None = None
+
+    def model_post_init(self, _context: Any) -> None:
+        if "." not in self.entity:
+            raise ValueError(f"entity {self.entity!r} is not a Home Assistant entity id")
+        if self.night is not None and self.range is None:
+            raise ValueError("a night range overrides a daytime range; set range as well")
+
+
+class SensorConfig(BaseModel):
+    """One physical device and where it is.
+
+    The key it is filed under is a **permanent identifier**: it is the join key
+    for every stored reading, exactly like a camera key. Rename with ``name`` or
+    ``aliases``. Nothing here is specific to a brand -- any Home Assistant entity
+    whose state is a number can be a measurement.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    location: str
+    measurements: dict[str, MeasurementConfig]
+
+    def model_post_init(self, _context: Any) -> None:
+        if not self.measurements:
+            raise ValueError(f"sensor {self.name!r} has no measurements")
+        for name in self.measurements:
+            if not _SLUG.match(name):
+                raise ValueError(
+                    f"measurement name {name!r} must be a lowercase slug, e.g. 'temperature'"
+                )
+
+
+class SensorsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sensors: dict[str, SensorConfig] = Field(default_factory=dict)
+
+    def measurement_entities(self) -> list[tuple[str, str, MeasurementConfig]]:
+        """Every (sensor_key, measurement, config), in a stable order."""
+        return [
+            (key, name, measurement)
+            for key, sensor in sorted(self.sensors.items())
+            for name, measurement in sorted(sensor.measurements.items())
+        ]
+
+
+def load_sensors_config(config_dir: Path) -> SensorsConfig:
+    """``config/sensors.yaml``, or no sensors at all when the file is absent.
+
+    Unlike cameras, sensors are optional: a house without any is a valid
+    deployment, and must not be refused at startup.
+    """
+    path = config_dir / "sensors.yaml"
+    if not path.exists():
+        return SensorsConfig()
+    raw = _load_yaml(path)
+    if raw.get("sensors") is None:
+        return SensorsConfig()
+    return SensorsConfig.model_validate(raw)
+
+
+def validate_sensors(home: HomeConfig, sensors: SensorsConfig, cameras: CamerasConfig) -> None:
+    """Cross-check sensors against the zones and against each other."""
+    known = set(home.zones)
+    problems: list[str] = []
+    seen: dict[str, str] = {}
+    for key, sensor in sensors.sensors.items():
+        if not _SLUG.match(key):
+            problems.append(f"sensor key {key!r} must be a lowercase slug")
+        if key in cameras.cameras:
+            problems.append(f"sensor key {key!r} is also a camera key; use a distinct key")
+        if sensor.location not in known:
+            problems.append(f"sensor {key!r} location {sensor.location!r} is not a declared zone")
+        for name, measurement in sensor.measurements.items():
+            where = f"{key}.{name}"
+            if measurement.entity in seen:
+                problems.append(
+                    f"entity {measurement.entity!r} is configured twice "
+                    f"({seen[measurement.entity]} and {where})"
+                )
+            seen[measurement.entity] = where
+    if problems:
+        raise ConfigError("invalid sensor configuration:\n  - " + "\n  - ".join(problems))

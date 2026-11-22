@@ -185,6 +185,24 @@ class HomeAssistantClient:
             last_updated=_maybe_ts("last_updated"),
         )
 
+    async def list_states(self) -> list[EntityState]:
+        """Every entity's current state. Used only to discover sensors to configure."""
+        response = await self._get("/api/states")
+        states: list[EntityState] = []
+        for data in response.json() or []:
+            if not isinstance(data, dict) or "entity_id" not in data:
+                continue
+            states.append(
+                EntityState(
+                    entity_id=str(data["entity_id"]),
+                    state=str(data.get("state", "")),
+                    attributes=data.get("attributes") or {},
+                    last_changed=None,
+                    last_updated=None,
+                )
+            )
+        return states
+
     async def get_camera_image(self, camera_entity_id: str) -> tuple[bytes, str]:
         """Live snapshot from a ``camera.*`` entity. Returns (bytes, media_type)."""
         response = await self._get(f"/api/camera_proxy/{camera_entity_id}")

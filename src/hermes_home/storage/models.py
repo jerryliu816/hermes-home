@@ -532,3 +532,74 @@ class CameraPipelineState(Base):
     #: Last trigger confirmed delivered end to end. Evidence the path works,
     #: distinct from evidence that we were watching it.
     last_verified_delivery_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+
+
+# --------------------------------------------------------------------------- #
+# Sensor readings: continuous measurements, not events
+# --------------------------------------------------------------------------- #
+
+
+class SensorStatus:
+    """What a stored reading row says about the value over its span."""
+
+    OK = "ok"
+    #: Home Assistant reported the entity unavailable -- for a Bluetooth sensor,
+    #: usually that it stopped hearing the device.
+    UNAVAILABLE = "unavailable"
+    #: HA reported ``unknown``, or a state that is not a number.
+    UNKNOWN = "unknown"
+    #: HA had no record for this span (purged, or before the entity existed).
+    NO_RECORD = "no_record"
+
+
+class SensorState(Base):
+    """One step of a measurement's step function: it held from ``started_at``
+    until the next row.
+
+    Readings are not events. A thermometer reports continuously, so storing each
+    report as an event would flood every event list and the correlator with
+    something that is not an occurrence. They live here instead, as the
+    transitions Home Assistant's recorder kept.
+
+    ``value`` is NULL whenever the value is not known, and ``status`` says why.
+    Never 0: a gap in a temperature record is not a reading of zero, and an
+    average must skip it, not include it.
+    """
+
+    __tablename__ = "sensor_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sensor_key: Mapped[str] = mapped_column(String(64))
+    measurement: Mapped[str] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    value: Mapped[float | None] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(16))
+    raw_state: Mapped[str | None] = mapped_column(String(255))
+    unit: Mapped[str | None] = mapped_column(String(32))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "sensor_key", "measurement", "started_at", name="sensor_measurement_instant"
+        ),
+    )
+
+
+class SensorSyncState(Base):
+    """How far one measurement has been copied from Home Assistant.
+
+    Everything after ``synced_through`` is not yet known here. Keyed by the
+    config key, not the entity id, so pointing a measurement at a renamed entity
+    continues the same history rather than starting a new one.
+    """
+
+    __tablename__ = "sensor_sync_state"
+
+    sensor_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    measurement: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entity_id: Mapped[str] = mapped_column(String(255))
+    synced_through: Mapped[datetime] = mapped_column(UtcDateTime)
+    first_synced_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    last_success_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    last_error: Mapped[str | None] = mapped_column(String(255))
+    unit: Mapped[str | None] = mapped_column(String(32))

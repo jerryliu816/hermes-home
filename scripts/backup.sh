@@ -52,6 +52,8 @@ fi
 # because a restore without it cannot talk to Home Assistant -- so the backup
 # directory is itself sensitive and is created private.
 cp "$ROOT/config/home.yaml" "$ROOT/config/cameras.yaml" "$OUT/" 2>/dev/null || true
+# Optional: absent on a house with no sensors configured.
+cp "$ROOT/config/sensors.yaml" "$OUT/" 2>/dev/null || true
 if [ -f "$ROOT/.env" ]; then
     cp "$ROOT/.env" "$OUT/env.backup"
     chmod 600 "$OUT/env.backup"

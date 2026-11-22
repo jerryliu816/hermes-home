@@ -28,6 +28,8 @@ EXPECTED_TOOLS = {
     "home_summarize_activity",
     "home_list_cameras",
     "home_coverage",
+    "home_list_sensors",
+    "home_sensor_history",
 }
 
 

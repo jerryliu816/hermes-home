@@ -9,13 +9,14 @@ from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from hermes_home.clients.home_assistant import HomeAssistantClient
-from hermes_home.config import CamerasConfig, HomeConfig, Settings
+from hermes_home.config import CamerasConfig, HomeConfig, SensorsConfig, Settings
 from hermes_home.vision.base import VisionProvider
 
 if TYPE_CHECKING:
     from hermes_home.health.monitor import CameraHealthMonitor
     from hermes_home.health.reconcile import DeliveryReconciler
     from hermes_home.ingest.worker import IngestWorker
+    from hermes_home.sensors.recorder import SensorRecorder
 
 
 @dataclass
@@ -37,6 +38,10 @@ class AppState:
     #: health monitor: the two failures are unrelated and have already occurred
     #: separately.
     reconciler: DeliveryReconciler | None = None
+    #: Sensors from config/sensors.yaml. Empty when the file is absent.
+    sensors: SensorsConfig = field(default_factory=SensorsConfig)
+    #: Copies sensor history from Home Assistant. Independent of the others.
+    sensor_recorder: SensorRecorder | None = None
     #: Alembic revision the running code expects; readiness compares the
     #: database against it so a half-applied upgrade is visible rather than
     #: silently serving against the wrong schema.

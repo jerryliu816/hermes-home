@@ -140,6 +140,10 @@ class ZoneView(BaseModel):
     adjacent_to: list[str] = Field(default_factory=list)
     relations: list[dict[str, str]] = Field(default_factory=list)
     observed_by_cameras: list[str] = Field(default_factory=list)
+    sensors: list[str] = Field(
+        default_factory=list,
+        description="Sensors located here (thermometers etc.). See home_list_sensors.",
+    )
 
 
 class CameraView(BaseModel):
@@ -333,6 +337,16 @@ class CoverageView(BaseModel):
     )
 
 
+class SensorView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    located_in: str
+    measurements: list[str]
+
+
 class HomeView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -340,6 +354,13 @@ class HomeView(BaseModel):
     timezone: str
     zones: list[ZoneView]
     cameras: list[CameraView]
+    sensors: list[SensorView] = Field(
+        default_factory=list,
+        description=(
+            "Thermometers and other sensors, and where they are. Readings: "
+            "home_list_sensors (now) and home_sensor_history (past)."
+        ),
+    )
     unobserved_zones: list[str] = Field(
         description="Zones no camera watches. Absence of events there means nothing."
     )

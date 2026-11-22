@@ -48,6 +48,7 @@ echo
 echo "The config and .env in the backup were NOT restored automatically."
 echo "Copy them by hand if this is a rebuild rather than a rollback:"
 echo "    cp $SRC/home.yaml $SRC/cameras.yaml $ROOT/config/"
+echo "    cp $SRC/sensors.yaml $ROOT/config/   # if the backup has one"
 echo "    cp $SRC/env.backup $ROOT/.env"
 echo
 echo "Then: make start"

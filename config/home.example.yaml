@@ -50,6 +50,9 @@ home:
     workshop:
       name: Workshop
       kind: interior
+    bedroom:
+      name: Bedroom
+      kind: interior
 
   # Adjacency is recorded now and deliberately not traversed in v1.
   # A future correlator can use it without a migration.
